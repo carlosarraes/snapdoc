@@ -1,5 +1,6 @@
 // /v1/* publisher endpoints (Bearer token auth).
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 import { renderMarkdown } from "./markdown";
 import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
 import { artifactJson, errorResponse, parseDuration, versionJson } from "./http";
@@ -89,7 +90,7 @@ async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promis
 export function createPublisherApp(): Hono<ApiContext> {
   const app = new Hono<ApiContext>();
 
-  app.use("*", async (c, next) => {
+  const authMiddleware: MiddlewareHandler<ApiContext> = async (c, next) => {
     const store = new Store(c.env.DB, c.env.BLOBS);
     c.set("store", store);
     const header = c.req.header("Authorization") ?? "";
@@ -100,7 +101,9 @@ export function createPublisherApp(): Hono<ApiContext> {
     }
     c.set("token", token);
     await next();
-  });
+  };
+  app.use("/artifacts", authMiddleware);
+  app.use("/artifacts/*", authMiddleware);
 
   app.onError((err) => mapStoreError(err));
 

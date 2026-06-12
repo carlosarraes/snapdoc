@@ -1,11 +1,13 @@
 import { Hono } from "hono";
 import { createPublisherApp, mapStoreError } from "./api";
+import { createAdminApp } from "./admin-api";
 import { serveArtifactHost } from "./serve";
 import { Store } from "./store";
 import { errorResponse } from "./http";
 import type { Env } from "./types";
 
 const apiApp = new Hono<{ Bindings: Env }>();
+apiApp.route("/v1/admin", createAdminApp());
 apiApp.route("/v1", createPublisherApp());
 apiApp.onError((err) => mapStoreError(err));
 apiApp.notFound((c) => {
