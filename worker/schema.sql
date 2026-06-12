@@ -27,5 +27,12 @@ CREATE TABLE IF NOT EXISTS versions (
   PRIMARY KEY (artifact_id, version)
 );
 
+CREATE TABLE IF NOT EXISTS publish_events (
+  token_id TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_publish_events_token_time ON publish_events(token_id, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_artifacts_status_expires ON artifacts(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_token ON artifacts(token_id);
