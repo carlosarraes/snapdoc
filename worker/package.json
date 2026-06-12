@@ -1,0 +1,24 @@
+{
+  "name": "snapdoc-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 execute snapdoc --local --file=schema.sql",
+    "db:migrate:remote": "wrangler d1 execute snapdoc --remote --file=schema.sql"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "marked": "^15.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20250501.0",
+    "typescript": "^5.7.0",
+    "vitest": "~3.2.0",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,39 @@
+name = "snapdoc"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Artifact host (landing + serving) and API host (JSON API + dashboard)
+routes = [
+  { pattern = "snapdoc.carraes.dev", custom_domain = true },
+  { pattern = "api.snapdoc.carraes.dev", custom_domain = true },
+]
+
+[assets]
+directory = "public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "snapdoc"
+database_id = "placeholder-set-after-d1-create"
+
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "snapdoc-artifacts"
+
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+ARTIFACT_HOST = "snapdoc.carraes.dev"
+API_HOST = "api.snapdoc.carraes.dev"
+MAX_ARTIFACT_BYTES = "2097152"
+DEFAULT_TTL = "14d"
+MAX_TTL = "90d"
+MIN_TTL = "1h"
+RATE_LIMIT_PER_HOUR = "100"
+
+# Secrets (set via `wrangler secret put`):
+# ADMIN_BOOTSTRAP — mints the first API token
+# CF_ACCESS_AUD / CF_ACCESS_TEAM_DOMAIN — Access JWT verification

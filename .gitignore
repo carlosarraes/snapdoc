@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+dist/
+*.log
+cli/snapdoc
+TASKS.md
+CHANGELOG.md
+.dev.vars
