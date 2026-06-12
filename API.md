@@ -52,6 +52,7 @@ Stable error codes (clients must switch on `code`, never on `message`):
 | 413 | `too_large` | Body exceeds 2 MB |
 | 429 | `rate_limited` | Over 100 publishes/hr; honors `Retry-After` header (seconds) |
 | 500 | `internal` | Unexpected server error |
+| 503 | `misconfigured` | Admin auth misconfigured server-side (e.g. Access env vars missing in production); admin routes fail closed |
 
 ## Artifact object
 
