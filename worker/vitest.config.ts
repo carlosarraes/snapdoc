@@ -17,6 +17,7 @@ export default defineWorkersConfig({
           bindings: {
             TEST_SCHEMA: schema,
             ADMIN_BOOTSTRAP: "test-bootstrap-secret",
+            ENVIRONMENT: "test",
           },
         },
       },

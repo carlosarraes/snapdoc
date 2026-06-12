@@ -36,7 +36,15 @@ RATE_LIMIT_PER_HOUR = "100"
 
 # Secrets (set via `wrangler secret put`):
 # ADMIN_BOOTSTRAP — mints the first API token
-# CF_ACCESS_AUD / CF_ACCESS_TEAM_DOMAIN — Access JWT verification
+# CF_ACCESS_AUD / CF_ACCESS_TEAM_DOMAIN — Access JWT verification (BOTH are
+#   required in production; the admin API fails closed with 503 "misconfigured"
+#   when either is missing)
+#
+# Local development: create a .dev.vars file (gitignored) containing
+#   ENVIRONMENT="dev"
+#   ADMIN_BOOTSTRAP="dev-bootstrap-secret"
+# ENVIRONMENT="dev"/"test" enables the admin-auth stub when
+# CF_ACCESS_TEAM_DOMAIN is unset. Never set ENVIRONMENT in production.
 
 # Keep the dev-server URL on localhost so the worker's path-based routing
 # fallback (instead of host-based routing) applies during `wrangler dev`.

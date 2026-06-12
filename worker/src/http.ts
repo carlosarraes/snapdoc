@@ -11,6 +11,7 @@ export type ErrorCode =
   | "not_active"
   | "too_large"
   | "rate_limited"
+  | "misconfigured"
   | "internal";
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
@@ -22,6 +23,7 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   not_active: 409,
   too_large: 413,
   rate_limited: 429,
+  misconfigured: 503,
   internal: 500,
 };
 

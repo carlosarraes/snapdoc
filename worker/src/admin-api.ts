@@ -1,7 +1,10 @@
 // /v1/admin/* endpoints, authenticated by Cloudflare Access (JWT in
-// Cf-Access-Jwt-Assertion). When CF_ACCESS_TEAM_DOMAIN is unset (local dev
-// and tests) requests are allowed through. POST /tokens additionally accepts
-// the ADMIN_BOOTSTRAP bearer secret so the first token can be minted headlessly.
+// Cf-Access-Jwt-Assertion). The auth stub (no Access verification) applies
+// only when CF_ACCESS_TEAM_DOMAIN is unset AND ENVIRONMENT is "dev" or
+// "test"; any other deployment missing CF_ACCESS_TEAM_DOMAIN or
+// CF_ACCESS_AUD fails closed with 503 "misconfigured". POST /tokens
+// additionally accepts the ADMIN_BOOTSTRAP bearer secret so the first token
+// can be minted headlessly.
 import { Hono } from "hono";
 import { mapStoreError, parseListParams } from "./api";
 import { artifactJson, errorResponse, versionJson } from "./http";
@@ -28,7 +31,9 @@ interface AccessClaims {
 }
 
 // Verifies a Cloudflare Access JWT (RS256) against the team domain's JWKS.
-async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud?: string): Promise<boolean> {
+// The audience check is mandatory: callers must fail closed before invoking
+// this when no expected AUD is configured.
+async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud: string): Promise<boolean> {
   try {
     const [headerPart, payloadPart, signaturePart] = jwt.split(".");
     if (!headerPart || !payloadPart || !signaturePart) return false;
@@ -40,10 +45,8 @@ async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud?: st
     if (typeof claims.exp !== "number" || claims.exp <= nowSeconds) return false;
     if (typeof claims.nbf === "number" && claims.nbf > nowSeconds) return false;
     if (claims.iss !== `https://${teamDomain}`) return false;
-    if (expectedAud) {
-      const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-      if (!aud.includes(expectedAud)) return false;
-    }
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!aud.includes(expectedAud)) return false;
 
     const certsRes = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
     if (!certsRes.ok) return false;
@@ -67,20 +70,47 @@ async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud?: st
   }
 }
 
-function isBootstrapRequest(c: { req: { method: string; path: string; header: (n: string) => string | undefined } }, env: Env): boolean {
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Compares secrets via their SHA-256 digests so comparison cost does not
+// leak how much of the secret prefix matches.
+async function secretsMatch(presented: string, expected: string): Promise<boolean> {
+  const [a, b] = await Promise.all([sha256Hex(presented), sha256Hex(expected)]);
+  return a === b;
+}
+
+async function isBootstrapRequest(
+  c: { req: { method: string; path: string; header: (n: string) => string | undefined } },
+  env: Env,
+): Promise<boolean> {
   if (!env.ADMIN_BOOTSTRAP) return false;
   if (c.req.method !== "POST" || !/\/tokens\/?$/.test(c.req.path)) return false;
   const header = c.req.header("Authorization") ?? "";
-  return header === `Bearer ${env.ADMIN_BOOTSTRAP}`;
+  if (!header.startsWith("Bearer ")) return false;
+  return secretsMatch(header.slice("Bearer ".length), env.ADMIN_BOOTSTRAP);
 }
+
+const DEV_STUB_ENVIRONMENTS = ["dev", "test"];
 
 export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Store } }> {
   const app = new Hono<{ Bindings: Env; Variables: { store: Store } }>();
 
   app.use("*", async (c, next) => {
     c.set("store", new Store(c.env.DB, c.env.BLOBS));
-    if (isBootstrapRequest(c, c.env)) return next();
-    if (!c.env.CF_ACCESS_TEAM_DOMAIN) return next(); // local dev / test stub
+    if (await isBootstrapRequest(c, c.env)) return next();
+    if (!c.env.CF_ACCESS_TEAM_DOMAIN) {
+      // Auth stub only for explicit dev/test environments; a production
+      // deployment missing its Access configuration must fail CLOSED.
+      if (DEV_STUB_ENVIRONMENTS.includes(c.env.ENVIRONMENT ?? "")) return next();
+      return errorResponse("misconfigured", "Admin API is not configured: CF_ACCESS_TEAM_DOMAIN is unset.");
+    }
+    if (!c.env.CF_ACCESS_AUD) {
+      // Without a pinned audience any same-team Access token would pass.
+      return errorResponse("misconfigured", "Admin API is not configured: CF_ACCESS_AUD is unset.");
+    }
     const jwt = c.req.header("Cf-Access-Jwt-Assertion");
     if (!jwt || !(await verifyAccessJwt(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD))) {
       return errorResponse("unauthorized", "A valid Cloudflare Access JWT is required.");

@@ -9,6 +9,8 @@ export interface Env {
   MAX_TTL: string;
   MIN_TTL: string;
   RATE_LIMIT_PER_HOUR: string;
+  // "dev" or "test" enables the admin-auth dev stub; leave unset in production.
+  ENVIRONMENT?: string;
   ADMIN_BOOTSTRAP?: string;
   CF_ACCESS_TEAM_DOMAIN?: string;
   CF_ACCESS_AUD?: string;

@@ -254,6 +254,68 @@ describe("Cloudflare Access enforcement (team domain configured)", () => {
   });
 });
 
+describe("admin auth hardening", () => {
+  async function fetchWithEnv(path: string, envOverride: Record<string, string | undefined>, init?: RequestInit) {
+    const { default: worker } = await import("../src/index");
+    const request = new Request(`${API_BASE}/v1/admin${path}`, init);
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    return worker.fetch(request, { ...env, ...envOverride } as typeof env, ctx);
+  }
+
+  const prodLike = { ENVIRONMENT: undefined, CF_ACCESS_TEAM_DOMAIN: undefined, CF_ACCESS_AUD: undefined };
+
+  it("fails closed (503 misconfigured) when no team domain is set outside dev/test", async () => {
+    for (const environment of [undefined, "production", "staging"]) {
+      const res = await fetchWithEnv("/tokens", { ...prodLike, ENVIRONMENT: environment });
+      await expectError(res, 503, "misconfigured");
+    }
+  });
+
+  it("keeps the dev stub when ENVIRONMENT is dev or test", async () => {
+    for (const environment of ["dev", "test"]) {
+      const res = await fetchWithEnv("/tokens", { ...prodLike, ENVIRONMENT: environment });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it("fails closed when the team domain is set but no audience is configured", async () => {
+    const res = await fetchWithEnv("/tokens", {
+      ...prodLike,
+      CF_ACCESS_TEAM_DOMAIN: "snapteam.cloudflareaccess.com",
+    });
+    await expectError(res, 503, "misconfigured");
+  });
+
+  it("still allows the bootstrap secret when misconfigured, but rejects near-miss secrets", async () => {
+    const mint = await fetchWithEnv("/tokens", prodLike, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-bootstrap-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `hard-${crypto.randomUUID()}` }),
+    });
+    expect(mint.status).toBe(201);
+
+    // Note: trailing whitespace is normalized away by the Headers class, so it
+    // is not a meaningful near-miss case.
+    for (const wrong of ["test-bootstrap-secre", "test-bootstrap-secretX", "Test-bootstrap-secret", ""]) {
+      const res = await fetchWithEnv("/tokens", prodLike, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${wrong}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "nope" }),
+      });
+      await expectError(res, 503, "misconfigured");
+    }
+  });
+
+  it("ignores the bootstrap secret when ADMIN_BOOTSTRAP is unset", async () => {
+    const res = await fetchWithEnv("/tokens", { ...prodLike, ADMIN_BOOTSTRAP: undefined }, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-bootstrap-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "nope" }),
+    });
+    await expectError(res, 503, "misconfigured");
+  });
+});
+
 describe("misc API routing", () => {
   it("404s unknown /v1 routes with the error envelope", async () => {
     const res = await SELF.fetch(`${API_BASE}/v1/nope`);
