@@ -8,6 +8,10 @@ export default defineWorkersConfig({
     setupFiles: ["./test/setup.ts"],
     poolOptions: {
       workers: {
+        // Isolated storage stacking currently trips over R2's sqlite WAL files,
+        // so tests run sequentially in one worker and reset state explicitly.
+        singleWorker: true,
+        isolatedStorage: false,
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
           bindings: {

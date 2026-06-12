@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   token_id TEXT NOT NULL REFERENCES tokens(id),
   current_version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  blobs_purged_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS versions (
