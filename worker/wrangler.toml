@@ -37,3 +37,8 @@ RATE_LIMIT_PER_HOUR = "100"
 # Secrets (set via `wrangler secret put`):
 # ADMIN_BOOTSTRAP — mints the first API token
 # CF_ACCESS_AUD / CF_ACCESS_TEAM_DOMAIN — Access JWT verification
+
+# Keep the dev-server URL on localhost so the worker's path-based routing
+# fallback (instead of host-based routing) applies during `wrangler dev`.
+[dev]
+host = "localhost"
