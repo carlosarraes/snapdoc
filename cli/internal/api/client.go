@@ -163,13 +163,20 @@ func (c *Client) Expire(id string) (*Artifact, error) {
 	return &a, nil
 }
 
-func (c *Client) CreateToken(name string) (*TokenSecret, error) {
+// CreateToken mints a token via the admin API, or — when bootstrap is true —
+// via POST /v1/tokens, which accepts only the bootstrap secret and is not
+// behind Cloudflare Access (the /v1/admin/* prefix is gated at the edge).
+func (c *Client) CreateToken(name string, bootstrap bool) (*TokenSecret, error) {
 	body, err := json.Marshal(map[string]string{"name": name})
 	if err != nil {
 		return nil, err
 	}
+	path := "/v1/admin/tokens"
+	if bootstrap {
+		path = "/v1/tokens"
+	}
 	var res TokenSecret
-	if err := c.do("POST", "/v1/admin/tokens", nil, bytes.NewReader(body), "application/json", &res); err != nil {
+	if err := c.do("POST", path, nil, bytes.NewReader(body), "application/json", &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

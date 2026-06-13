@@ -226,7 +226,7 @@ func TestCreateToken(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{BaseURL: srv.URL, Token: "bootstrap-secret"}
-	tok, err := c.CreateToken("ci-bot")
+	tok, err := c.CreateToken("ci-bot", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,5 +368,24 @@ func TestNoAuthHeaderWhenTokenEmpty(t *testing.T) {
 	}
 	if cap.auth != "" {
 		t.Errorf("Authorization = %q, want empty", cap.auth)
+	}
+}
+
+// Bootstrap minting must NOT use /v1/admin/* — Cloudflare Access intercepts
+// that prefix at the edge, so headless bootstrap goes through /v1/tokens.
+func TestCreateTokenBootstrapPath(t *testing.T) {
+	var cap capture
+	srv := contractServer(t, &cap, 201, `{"id":"tok_1","name":"ci-bot","token":"sd_live_secret","created_at":"2026-06-12T15:04:05Z"}`, nil)
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "bootstrap-secret"}
+	if _, err := c.CreateToken("ci-bot", true); err != nil {
+		t.Fatal(err)
+	}
+	if cap.method != "POST" || cap.path != "/v1/tokens" {
+		t.Errorf("request = %s %s, want POST /v1/tokens", cap.method, cap.path)
+	}
+	if cap.auth != "Bearer bootstrap-secret" {
+		t.Errorf("Authorization = %q", cap.auth)
 	}
 }

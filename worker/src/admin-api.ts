@@ -82,15 +82,39 @@ async function secretsMatch(presented: string, expected: string): Promise<boolea
   return a === b;
 }
 
+// Checks an Authorization header against the ADMIN_BOOTSTRAP secret. Shared
+// with the publisher app's POST /v1/tokens, which exists because /v1/admin/*
+// sits behind Cloudflare Access at the edge and can never be reached headlessly.
+export async function verifyBootstrapHeader(header: string | undefined, env: Env): Promise<boolean> {
+  if (!env.ADMIN_BOOTSTRAP) return false;
+  if (!header?.startsWith("Bearer ")) return false;
+  return secretsMatch(header.slice("Bearer ".length), env.ADMIN_BOOTSTRAP);
+}
+
 async function isBootstrapRequest(
   c: { req: { method: string; path: string; header: (n: string) => string | undefined } },
   env: Env,
 ): Promise<boolean> {
-  if (!env.ADMIN_BOOTSTRAP) return false;
   if (c.req.method !== "POST" || !/\/tokens\/?$/.test(c.req.path)) return false;
-  const header = c.req.header("Authorization") ?? "";
-  if (!header.startsWith("Bearer ")) return false;
-  return secretsMatch(header.slice("Bearer ".length), env.ADMIN_BOOTSTRAP);
+  return verifyBootstrapHeader(c.req.header("Authorization"), env);
+}
+
+// Shared by the admin app and the publisher app's bootstrap mint route.
+export async function mintTokenResponse(req: Request, store: Store): Promise<Response> {
+  let name: unknown;
+  try {
+    ({ name } = (await req.json()) as { name?: unknown });
+  } catch {
+    return errorResponse("invalid_request", "Body must be JSON: { \"name\": \"...\" }.");
+  }
+  if (typeof name !== "string" || name.trim().length === 0) {
+    return errorResponse("invalid_request", "Token name is required.");
+  }
+  const minted = await store.mintToken(name.trim());
+  return Response.json(
+    { id: minted.id, name: minted.name, token: minted.token, created_at: minted.createdAt },
+    { status: 201 },
+  );
 }
 
 const DEV_STUB_ENVIRONMENTS = ["dev", "test"];
@@ -122,22 +146,7 @@ export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Stor
 
   // ---- tokens ----
 
-  app.post("/tokens", async (c) => {
-    let name: unknown;
-    try {
-      ({ name } = await c.req.json<{ name?: unknown }>());
-    } catch {
-      return errorResponse("invalid_request", "Body must be JSON: { \"name\": \"...\" }.");
-    }
-    if (typeof name !== "string" || name.trim().length === 0) {
-      return errorResponse("invalid_request", "Token name is required.");
-    }
-    const minted = await c.get("store").mintToken(name.trim());
-    return c.json(
-      { id: minted.id, name: minted.name, token: minted.token, created_at: minted.createdAt },
-      201,
-    );
-  });
+  app.post("/tokens", (c) => mintTokenResponse(c.req.raw, c.get("store")));
 
   app.get("/tokens", async (c) => {
     const tokens = await c.get("store").listTokens();

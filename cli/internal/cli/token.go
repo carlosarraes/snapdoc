@@ -30,7 +30,7 @@ func (c *TokenCreateCmd) Run(g *Globals, streams *IO) error {
 		}
 		client.Token = secret
 	}
-	tok, err := client.CreateToken(c.Name)
+	tok, err := client.CreateToken(c.Name, c.Bootstrap)
 	if err != nil {
 		return err
 	}

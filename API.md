@@ -148,8 +148,11 @@ scoped to a creator and includes `token_name`). Additionally:
 
 ### Bootstrap
 
-`POST /v1/admin/tokens` also accepts `Authorization: Bearer <ADMIN_BOOTSTRAP secret>`
-in place of Cloudflare Access, so the first token can be minted headlessly.
+`POST /v1/tokens` (publisher namespace, **not** behind Cloudflare Access) accepts
+`Authorization: Bearer <ADMIN_BOOTSTRAP secret>` — and only that secret — so the
+first token can be minted headlessly. This route exists because Cloudflare Access
+intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there.
+`POST /v1/admin/tokens` also still accepts the bootstrap bearer for completeness.
 
 ## Serving behavior (snapdoc.carraes.dev) — for reference
 

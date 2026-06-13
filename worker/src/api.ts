@@ -1,6 +1,7 @@
 // /v1/* publisher endpoints (Bearer token auth).
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
 import { artifactJson, errorResponse, parseDuration, versionJson } from "./http";
@@ -106,6 +107,16 @@ export function createPublisherApp(): Hono<ApiContext> {
   app.use("/artifacts/*", authMiddleware);
 
   app.onError((err) => mapStoreError(err));
+
+  // Bootstrap token minting lives outside /v1/admin/* because Cloudflare
+  // Access intercepts that prefix at the edge, making headless bootstrap
+  // impossible there. This route accepts ONLY the ADMIN_BOOTSTRAP secret.
+  app.post("/tokens", async (c) => {
+    if (!(await verifyBootstrapHeader(c.req.header("Authorization"), c.env))) {
+      return errorResponse("unauthorized", "The bootstrap secret is required to mint tokens here.");
+    }
+    return mintTokenResponse(c.req.raw, new Store(c.env.DB, c.env.BLOBS));
+  });
 
   app.post("/artifacts", async (c) => {
     const store = c.get("store");

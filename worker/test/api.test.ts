@@ -303,3 +303,31 @@ describe("path-based fallback for local dev", () => {
     expect(res.status).toBe(201);
   });
 });
+
+describe("POST /v1/tokens (bootstrap mint, not Access-gated)", () => {
+  it("mints a token with the bootstrap secret", async () => {
+    const res = await SELF.fetch(`${API_BASE}/v1/tokens`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-bootstrap-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `boot-${crypto.randomUUID()}` }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string; name: string; token: string };
+    expect(body.token).toMatch(/^sd_live_/);
+    // minted token can actually publish
+    const pub = await publish({ token: body.token });
+    expect(pub.status).toBe(201);
+  });
+
+  it("rejects publisher API tokens and wrong secrets", async () => {
+    const tok = await mintToken();
+    for (const auth of [`Bearer ${tok.token}`, "Bearer wrong-secret", ""]) {
+      const res = await SELF.fetch(`${API_BASE}/v1/tokens`, {
+        method: "POST",
+        headers: { ...(auth ? { Authorization: auth } : {}), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "nope" }),
+      });
+      await expectError(res, 401, "unauthorized");
+    }
+  });
+});
