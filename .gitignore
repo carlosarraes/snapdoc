@@ -6,3 +6,6 @@ cli/snapdoc
 TASKS.md
 CHANGELOG.md
 .dev.vars
+.env
+.env.*
+build/
