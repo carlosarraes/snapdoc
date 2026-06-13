@@ -16,7 +16,7 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "snapdoc"
-database_id = "placeholder-set-after-d1-create"
+database_id = "cba32e0b-1ac5-423d-80a6-f55beb77f943"
 
 [[r2_buckets]]
 binding = "BLOBS"
