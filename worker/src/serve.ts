@@ -64,6 +64,20 @@ p { color: #59636e; }
 
 export async function serveArtifactHost(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+
+  // Artifacts rarely declare their own icon, so browsers fall back to
+  // /favicon.ico — answer with the snapdoc logo instead of a 404.
+  if (url.pathname === "/favicon.ico") {
+    const logo = await env.ASSETS.fetch(new Request(new URL("/logo.svg", url.origin)));
+    if (logo.ok) {
+      return new Response(logo.body, {
+        status: 200,
+        headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" },
+      });
+    }
+    return logo;
+  }
+
   const match = ID_PATTERN.exec(url.pathname);
   if (!match) return env.ASSETS.fetch(request);
 

@@ -96,3 +96,13 @@ describe("artifact serving", () => {
     expect(res.status).toBe(405);
   });
 });
+
+describe("favicon fallback", () => {
+  // Artifacts rarely declare an icon, so browsers request /favicon.ico on the
+  // artifact host; answer with the snapdoc logo instead of a 404 globe.
+  it("serves the logo SVG at /favicon.ico", async () => {
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/favicon.ico`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("svg");
+  });
+});
