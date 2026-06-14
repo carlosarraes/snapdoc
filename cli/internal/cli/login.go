@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/carraes/snapdoc/cli/internal/config"
+	"github.com/carlosarraes/snapdoc/cli/internal/config"
 )
 
 type LoginCmd struct{}

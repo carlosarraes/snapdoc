@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/carraes/snapdoc/cli/internal/api"
+	"github.com/carlosarraes/snapdoc/cli/internal/api"
 )
 
 type PublishCmd struct {

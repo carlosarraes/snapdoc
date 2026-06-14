@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/carraes/snapdoc/cli/internal/cli"
+	"github.com/carlosarraes/snapdoc/cli/internal/cli"
 )
 
 func main() {

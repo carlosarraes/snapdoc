@@ -16,7 +16,7 @@ default: build
 build:
     @echo "Building {{binary_name}}..."
     @mkdir -p {{build_dir}}
-    @cd {{cli_dir}} && go build {{build_flags}} -ldflags "{{ldflags}}" -o ../{{build_dir}}/{{binary_name}} .
+    @go build {{build_flags}} -ldflags "{{ldflags}}" -o {{build_dir}}/{{binary_name}} {{cli_dir}}
     @mkdir -p {{install_dir}}
     @cp {{build_dir}}/{{binary_name}} {{install_dir}}/
     @echo "Installed {{install_dir}}/{{binary_name}}"
@@ -26,7 +26,7 @@ test: test-cli test-worker
 
 # Run Go CLI tests
 test-cli:
-    @cd {{cli_dir}} && go test ./...
+    @go test {{cli_dir}}/...
 
 # Run worker tests (vitest + workers pool)
 test-worker:
@@ -34,7 +34,7 @@ test-worker:
 
 # Format and vet the Go code
 check:
-    @cd {{cli_dir}} && go fmt ./... && go vet ./...
+    @go fmt {{cli_dir}}/... && go vet {{cli_dir}}/...
     @cd {{worker_dir}} && npx tsc --noEmit
 
 # Run the worker locally

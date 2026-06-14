@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
-	"github.com/carraes/snapdoc/cli/internal/api"
+	"github.com/carlosarraes/snapdoc/cli/internal/api"
 )
 
 type ListCmd struct {

@@ -9,8 +9,8 @@ import (
 	"io"
 
 	"github.com/alecthomas/kong"
-	"github.com/carraes/snapdoc/cli/internal/api"
-	"github.com/carraes/snapdoc/cli/internal/config"
+	"github.com/carlosarraes/snapdoc/cli/internal/api"
+	"github.com/carlosarraes/snapdoc/cli/internal/config"
 )
 
 // IO carries the injected streams so commands are testable end-to-end.
