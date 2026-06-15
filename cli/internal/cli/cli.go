@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/carlosarraes/snapdoc/cli/internal/api"
 	"github.com/carlosarraes/snapdoc/cli/internal/config"
+	"github.com/carlosarraes/snapdoc/cli/internal/version"
 )
 
 // IO carries the injected streams so commands are testable end-to-end.
@@ -44,6 +45,8 @@ func (g *Globals) client() (*api.Client, error) {
 type CLI struct {
 	Globals
 
+	Version kong.VersionFlag `help:"Print version and exit."`
+
 	Publish PublishCmd `cmd:"" help:"Publish an HTML or Markdown artifact from a file or stdin."`
 	List    ListCmd    `cmd:"" help:"List your artifacts."`
 	Get     GetCmd     `cmd:"" help:"Show artifact metadata and versions."`
@@ -63,6 +66,7 @@ func Run(args []string, streams *IO) int {
 		kong.Description("CLI-first HTML artifact hoster."),
 		kong.UsageOnError(),
 		kong.Writers(streams.Stdout, streams.Stderr),
+		kong.Vars{"version": version.Version},
 		kong.Exit(func(int) { exited = true }),
 	)
 	if err != nil {

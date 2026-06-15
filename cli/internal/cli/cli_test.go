@@ -701,3 +701,13 @@ func TestUnknownCommandFails(t *testing.T) {
 		t.Error("want error on stderr")
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	stdout, _, code := runCLI([]string{"--version"}, "")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if strings.TrimSpace(stdout) == "" {
+		t.Fatal("--version printed nothing")
+	}
+}
