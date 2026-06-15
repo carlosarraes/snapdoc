@@ -5,7 +5,7 @@
 #   curl -sSf https://raw.githubusercontent.com/carlosarraes/snapdoc/main/install.sh | sh
 #
 # Pin a specific version (skips the "latest" lookup):
-#   curl -sSf .../install.sh | VERSION=v1.2.3 sh
+#   curl -sSf .../install.sh | VERSION=v0.0.1 sh
 #
 # The downloaded binary is verified against the release's SHA256SUMS before
 # it is installed; a mismatch aborts.

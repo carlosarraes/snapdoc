@@ -19,7 +19,10 @@ curl -sSf https://raw.githubusercontent.com/carlosarraes/snapdoc/main/install.sh
 go install github.com/carlosarraes/snapdoc/cli@latest
 ```
 
-Prebuilt binaries for each release are on the [releases page](https://github.com/carlosarraes/snapdoc/releases).
+The installer verifies the binary against the release checksums. Pin a version
+with `curl -sSf …/install.sh | VERSION=v0.0.1 sh`, or grab a prebuilt binary
+from the [releases page](https://github.com/carlosarraes/snapdoc/releases).
+Check your install with `snapdoc --version`.
 
 ## Quickstart
 
@@ -80,6 +83,12 @@ The Worker lives in [`worker/`](worker/). Deploy with
 for the D1/R2 bindings and required secrets (`ADMIN_BOOTSTRAP`,
 `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`). The dashboard SPA spec is in
 [`LANDING.md`](LANDING.md).
+
+## Releasing
+
+`VERSION` is the single source of truth, injected into the binary at build time.
+`just release 0.0.2` bumps it, commits, tags `v0.0.2`, and pushes — the GitHub
+Actions workflow then builds the binaries and publishes the release.
 
 ## License
 
