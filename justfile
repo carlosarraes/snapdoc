@@ -6,8 +6,12 @@ worker_dir := "./worker"
 build_dir := "./build"
 install_dir := env_var("HOME") / ".local/bin"
 
+# Single source of truth for the version (bumped by `just release`).
+version := `cat VERSION 2>/dev/null || echo dev`
+version_pkg := "github.com/carlosarraes/snapdoc/cli/internal/version"
+
 build_flags := "-trimpath"
-ldflags := "-s -w"
+ldflags := "-s -w -X " + version_pkg + ".Version=" + version
 
 # Default recipe
 default: build
@@ -52,6 +56,37 @@ migrate-remote:
 # Deploy the worker (uploads public/ assets too)
 deploy:
     @cd {{worker_dir}} && npx wrangler deploy
+
+# Print the current version
+version:
+    @echo {{version}}
+
+# Cut a release: bump VERSION, commit, tag vX.Y.Z, and push (CI builds binaries).
+# Usage: just release 0.0.2
+release new_version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="{{new_version}}"; ver="${ver#v}"
+    if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "error: version must be semver like 0.0.2 (got '{{new_version}}')" >&2
+        exit 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "error: working tree is dirty; commit or stash first" >&2
+        exit 1
+    fi
+    if git rev-parse "v$ver" >/dev/null 2>&1; then
+        echo "error: tag v$ver already exists" >&2
+        exit 1
+    fi
+    go test {{cli_dir}}/...
+    printf '%s\n' "$ver" > VERSION
+    git add VERSION
+    git commit -m "chore: release v$ver"
+    git tag -a "v$ver" -m "v$ver"
+    git push origin HEAD
+    git push origin "v$ver"
+    echo "Pushed v$ver — GitHub Actions will build and publish the release."
 
 # Remove build artifacts
 clean:
