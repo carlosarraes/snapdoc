@@ -286,13 +286,13 @@ func TestRevokeToken(t *testing.T) {
 
 func TestErrorEnvelope(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     int
-		code       string
-		message    string
-		header     map[string]string
-		wantRetry  string
-		wantInErr  []string
+		name      string
+		status    int
+		code      string
+		message   string
+		header    map[string]string
+		wantRetry string
+		wantInErr []string
 	}{
 		{name: "invalid_request", status: 400, code: "invalid_request", message: "Malformed body.", wantInErr: []string{"invalid_request", "Malformed body."}},
 		{name: "invalid_ttl", status: 400, code: "invalid_ttl", message: "TTL outside 1h-90d bounds.", wantInErr: []string{"invalid_ttl"}},
