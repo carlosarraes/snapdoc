@@ -331,3 +331,29 @@ describe("POST /v1/tokens (bootstrap mint, not Access-gated)", () => {
     }
   });
 });
+
+describe("markdown frontmatter title", () => {
+  it("uses the frontmatter title as the artifact title when no ?title= is given", async () => {
+    const tok = await mintToken();
+    const res = await publish({
+      token: tok.token,
+      contentType: "text/markdown",
+      body: "---\ntitle: Frontmatter Title\n---\n# Heading\n",
+    });
+    expect(res.status).toBe(201);
+    const art = (await res.json()) as ArtifactJson;
+    expect(art.title).toBe("Frontmatter Title");
+  });
+
+  it("lets an explicit ?title= override the frontmatter title", async () => {
+    const tok = await mintToken();
+    const res = await publish({
+      token: tok.token,
+      contentType: "text/markdown",
+      title: "Explicit",
+      body: "---\ntitle: Frontmatter Title\n---\n# Heading\n",
+    });
+    const art = (await res.json()) as ArtifactJson;
+    expect(art.title).toBe("Explicit");
+  });
+});

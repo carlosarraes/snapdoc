@@ -1,4 +1,4 @@
-import { marked } from "marked";
+import { Marked } from "marked";
 
 // Replaceable renderer: trusted markdown text -> self-contained styled HTML document.
 
@@ -23,6 +23,11 @@ th, td { border: 1px solid #d1d9e0; padding: 0.4em 0.8em; }
 th { background: #f6f8fa; }
 img { max-width: 100%; }
 hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
+.toc { background: #f6f8fa; border: 1px solid #d1d9e0; border-radius: 8px; padding: 0.75rem 1rem; margin: 0 0 1.75rem; }
+.toc-title { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #59636e; margin-bottom: 0.4rem; }
+.toc ul { list-style: none; margin: 0; padding: 0; }
+.toc li { margin: 0.15rem 0; }
+.toc li.toc-h3 { padding-left: 1.1rem; }
 @media (prefers-color-scheme: dark) {
   body { color: #e6edf3; background: #0d1117; }
   h1, h2 { border-color: #30363d; }
@@ -33,6 +38,8 @@ hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
   th, td { border-color: #30363d; }
   th { background: #161b22; }
   hr { border-color: #30363d; }
+  .toc { background: #161b22; border-color: #30363d; }
+  .toc-title { color: #9198a1; }
 }
 `;
 
@@ -44,10 +51,102 @@ export function escapeHtml(text: string): string {
     .replaceAll('"', "&quot;");
 }
 
-export async function renderMarkdown(markdown: string, title?: string): Promise<string> {
-  const body = await marked.parse(markdown, { async: true, gfm: true });
-  const safeTitle = escapeHtml(title?.trim() || "snapdoc artifact");
-  return `<!doctype html>
+export interface Frontmatter {
+  title?: string;
+  toc?: boolean;
+}
+
+// Minimal leading `---` frontmatter parser. Recognizes only simple `key: value`
+// scalars for the keys `title` and `toc`; no nested YAML, no dependency.
+export function parseFrontmatter(src: string): { meta: Frontmatter; body: string } {
+  const lines = src.split("\n");
+  if (lines[0]?.trim() !== "---") return { meta: {}, body: src };
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return { meta: {}, body: src };
+
+  const meta: Frontmatter = {};
+  for (let i = 1; i < end; i++) {
+    const colon = lines[i].indexOf(":");
+    if (colon === -1) continue;
+    const key = lines[i].slice(0, colon).trim();
+    let val = lines[i].slice(colon + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    if (key === "title") meta.title = val;
+    else if (key === "toc") meta.toc = val === "true" || val === "yes";
+  }
+  return { meta, body: lines.slice(end + 1).join("\n") };
+}
+
+function slugify(text: string, seen: Map<string, number>): string {
+  const base =
+    text
+      .toLowerCase()
+      .replace(/[^\w]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "section";
+  const count = seen.get(base) ?? 0;
+  seen.set(base, count + 1);
+  return count === 0 ? base : `${base}-${count + 1}`;
+}
+
+interface CollectedHeading {
+  depth: number;
+  slug: string;
+  text: string;
+}
+
+function buildToc(headings: CollectedHeading[]): string {
+  if (headings.length === 0) return "";
+  const items = headings
+    .map((h) => `<li class="toc-h${h.depth}"><a href="#${h.slug}">${h.text}</a></li>`)
+    .join("");
+  return `<nav class="toc"><div class="toc-title">Contents</div><ul>${items}</ul></nav>\n`;
+}
+
+// Renders trusted markdown into a self-contained HTML document. Adds slug ids to
+// every heading; when frontmatter sets `toc: true`, prepends a table of contents
+// for h2/h3. Returns the resolved frontmatter title so callers can fall back to
+// it when no explicit title was supplied.
+export async function renderMarkdown(
+  markdown: string,
+  title?: string,
+): Promise<{ html: string; title: string | null }> {
+  const { meta, body: src } = parseFrontmatter(markdown);
+
+  // Request-local state: a fresh instance + closures keep heading/slug state
+  // from leaking across requests (Workers reuse module globals).
+  const headings: CollectedHeading[] = [];
+  const seen = new Map<string, number>();
+  const md = new Marked({ async: true, gfm: true });
+  md.use({
+    renderer: {
+      heading(token) {
+        const inner = this.parser.parseInline(token.tokens);
+        const slug = slugify(token.text, seen);
+        if (token.depth === 2 || token.depth === 3) {
+          headings.push({ depth: token.depth, slug, text: inner });
+        }
+        return `<h${token.depth} id="${slug}">${inner}</h${token.depth}>\n`;
+      },
+    },
+  });
+
+  const rendered = (await md.parse(src)) as string;
+  const tocHtml = meta.toc ? buildToc(headings) : "";
+  const effectiveTitle = title?.trim() || meta.title || "snapdoc artifact";
+  const safeTitle = escapeHtml(effectiveTitle);
+
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -57,8 +156,8 @@ export async function renderMarkdown(markdown: string, title?: string): Promise<
 <style>${THEME_CSS}</style>
 </head>
 <body>
-${body}
-</body>
+${tocHtml}${rendered}</body>
 </html>
 `;
+  return { html, title: meta.title ?? null };
 }

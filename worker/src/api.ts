@@ -73,8 +73,15 @@ export async function readPublishInput(
     return errorResponse("invalid_request", "Artifact body must not be empty.");
   }
 
-  const body = rawType === "text/markdown" ? await renderMarkdown(raw, title ?? undefined) : raw;
-  return { body, contentType: "text/html", title, ttlSeconds };
+  let body = raw;
+  let resolvedTitle = title;
+  if (rawType === "text/markdown") {
+    const rendered = await renderMarkdown(raw, title ?? undefined);
+    body = rendered.html;
+    // Fall back to a frontmatter title when no explicit ?title= was given.
+    if (resolvedTitle === null) resolvedTitle = rendered.title;
+  }
+  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds };
 }
 
 async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promise<Response | null> {
