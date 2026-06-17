@@ -272,3 +272,56 @@ describe("cleanupExpired", () => {
     expect(err).toBeInstanceOf(Error);
   });
 });
+
+describe("comments", () => {
+  it("adds a comment recording author and the artifact's current version", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    await store.addVersion(art.id, { defaultTtlSeconds: 14 * DAY, contentType: "text/html", body: HTML });
+
+    const c = await store.addComment(art.id, { author: "jane@team.com", body: "tighten intro" });
+    expect(c.id).toMatch(/^cmt_/);
+    expect(c.author).toBe("jane@team.com");
+    expect(c.body).toBe("tighten intro");
+    expect(c.version).toBe(2); // current_version after the addVersion
+    expect(c.createdAt).toBeTruthy();
+  });
+
+  it("lists comments oldest-first, excluding soft-deleted", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const a = await store.addComment(art.id, { author: "a@t.com", body: "first" });
+    await store.addComment(art.id, { author: "b@t.com", body: "second" });
+
+    let list = await store.listComments(art.id);
+    expect(list.comments.map((c) => c.body)).toEqual(["first", "second"]);
+    expect(list.truncated).toBe(false);
+
+    await store.deleteComment(a.id);
+    list = await store.listComments(art.id);
+    expect(list.comments.map((c) => c.body)).toEqual(["second"]);
+  });
+
+  it("soft-delete is idempotent and returns null for unknown ids", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const c = await store.addComment(art.id, { author: "a@t.com", body: "x" });
+    const first = await store.deleteComment(c.id);
+    expect(first?.id).toBe(c.id);
+    const again = await store.deleteComment(c.id);
+    expect(again?.id).toBe(c.id); // idempotent
+    expect(await store.deleteComment("cmt_nope")).toBeNull();
+  });
+
+  it("rejects comments on missing or deleted artifacts", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    await expect(store.addComment("zzzzzzzzzzzzzz", { author: "a@t.com", body: "x" })).rejects.toThrow(StoreError);
+    await store.deleteArtifact(art.id);
+    await expect(store.addComment(art.id, { author: "a@t.com", body: "x" })).rejects.toThrow(StoreError);
+  });
+});

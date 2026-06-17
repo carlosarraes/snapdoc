@@ -7,7 +7,7 @@
 // can be minted headlessly.
 import { Hono } from "hono";
 import { mapStoreError, parseListParams } from "./api";
-import { artifactJson, errorResponse, versionJson } from "./http";
+import { artifactJson, commentJson, errorResponse, versionJson } from "./http";
 import { Store } from "./store";
 import type { Env } from "./types";
 
@@ -28,28 +28,34 @@ interface AccessClaims {
   aud?: string | string[];
   exp?: number;
   nbf?: number;
+  email?: string;
 }
 
-// Verifies a Cloudflare Access JWT (RS256) against the team domain's JWKS.
-// The audience check is mandatory: callers must fail closed before invoking
-// this when no expected AUD is configured.
-async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud: string): Promise<boolean> {
+// Verifies a Cloudflare Access JWT (RS256) against the team domain's JWKS and,
+// on success, returns the identity email claim. The audience check is mandatory:
+// callers must fail closed before invoking this when no expected AUD is configured.
+async function verifyAccessJwt(
+  jwt: string,
+  teamDomain: string,
+  expectedAud: string,
+): Promise<{ valid: boolean; email: string | null }> {
+  const invalid = { valid: false, email: null };
   try {
     const [headerPart, payloadPart, signaturePart] = jwt.split(".");
-    if (!headerPart || !payloadPart || !signaturePart) return false;
+    if (!headerPart || !payloadPart || !signaturePart) return invalid;
     const header = b64urlDecodeToJson<{ alg?: string; kid?: string }>(headerPart);
-    if (header.alg !== "RS256") return false;
+    if (header.alg !== "RS256") return invalid;
     const claims = b64urlDecodeToJson<AccessClaims>(payloadPart);
 
     const nowSeconds = Math.floor(Date.now() / 1000);
-    if (typeof claims.exp !== "number" || claims.exp <= nowSeconds) return false;
-    if (typeof claims.nbf === "number" && claims.nbf > nowSeconds) return false;
-    if (claims.iss !== `https://${teamDomain}`) return false;
+    if (typeof claims.exp !== "number" || claims.exp <= nowSeconds) return invalid;
+    if (typeof claims.nbf === "number" && claims.nbf > nowSeconds) return invalid;
+    if (claims.iss !== `https://${teamDomain}`) return invalid;
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!aud.includes(expectedAud)) return false;
+    if (!aud.includes(expectedAud)) return invalid;
 
     const certsRes = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
-    if (!certsRes.ok) return false;
+    if (!certsRes.ok) return invalid;
     const { keys } = (await certsRes.json()) as { keys: (JsonWebKey & { kid?: string })[] };
     const candidates = header.kid ? keys.filter((k) => k.kid === header.kid) : keys;
     const data = new TextEncoder().encode(`${headerPart}.${payloadPart}`);
@@ -62,11 +68,13 @@ async function verifyAccessJwt(jwt: string, teamDomain: string, expectedAud: str
         false,
         ["verify"],
       );
-      if (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, data)) return true;
+      if (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, data)) {
+        return { valid: true, email: claims.email ?? null };
+      }
     }
-    return false;
+    return invalid;
   } catch {
-    return false;
+    return invalid;
   }
 }
 
@@ -118,9 +126,12 @@ export async function mintTokenResponse(req: Request, store: Store): Promise<Res
 }
 
 const DEV_STUB_ENVIRONMENTS = ["dev", "test"];
+const MAX_COMMENT_BYTES = 8 * 1024;
 
-export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Store } }> {
-  const app = new Hono<{ Bindings: Env; Variables: { store: Store } }>();
+type AdminCtx = { Bindings: Env; Variables: { store: Store; accessEmail?: string } };
+
+export function createAdminApp(): Hono<AdminCtx> {
+  const app = new Hono<AdminCtx>();
 
   app.use("*", async (c, next) => {
     c.set("store", new Store(c.env.DB, c.env.BLOBS));
@@ -128,7 +139,10 @@ export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Stor
     if (!c.env.CF_ACCESS_TEAM_DOMAIN) {
       // Auth stub only for explicit dev/test environments; a production
       // deployment missing its Access configuration must fail CLOSED.
-      if (DEV_STUB_ENVIRONMENTS.includes(c.env.ENVIRONMENT ?? "")) return next();
+      if (DEV_STUB_ENVIRONMENTS.includes(c.env.ENVIRONMENT ?? "")) {
+        c.set("accessEmail", c.req.header("X-Access-Email") ?? "dev@local");
+        return next();
+      }
       return errorResponse("misconfigured", "Admin API is not configured: CF_ACCESS_TEAM_DOMAIN is unset.");
     }
     if (!c.env.CF_ACCESS_AUD) {
@@ -136,9 +150,11 @@ export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Stor
       return errorResponse("misconfigured", "Admin API is not configured: CF_ACCESS_AUD is unset.");
     }
     const jwt = c.req.header("Cf-Access-Jwt-Assertion");
-    if (!jwt || !(await verifyAccessJwt(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD))) {
+    const verified = jwt ? await verifyAccessJwt(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD) : null;
+    if (!verified || !verified.valid) {
       return errorResponse("unauthorized", "A valid Cloudflare Access JWT is required.");
     }
+    if (verified.email) c.set("accessEmail", verified.email);
     return next();
   });
 
@@ -196,6 +212,45 @@ export function createAdminApp(): Hono<{ Bindings: Env; Variables: { store: Stor
   app.delete("/artifacts/:id", async (c) => {
     const result = await c.get("store").deleteArtifact(c.req.param("id"));
     return c.json(result);
+  });
+
+  // ---- comments (humans author via Access; agents read via token in api.ts) ----
+
+  app.post("/artifacts/:id/comments", async (c) => {
+    let body: unknown;
+    try {
+      ({ body } = (await c.req.json()) as { body?: unknown });
+    } catch {
+      return errorResponse("invalid_request", "Body must be JSON: { \"body\": \"...\" }.");
+    }
+    if (typeof body !== "string" || body.trim().length === 0) {
+      return errorResponse("invalid_request", "Comment body is required.");
+    }
+    if (new TextEncoder().encode(body).byteLength > MAX_COMMENT_BYTES) {
+      return errorResponse("invalid_request", "Comment exceeds the 8 KB limit.");
+    }
+    const comment = await c.get("store").addComment(c.req.param("id"), {
+      author: c.get("accessEmail") ?? "unknown",
+      body,
+    });
+    return c.json(commentJson(comment), 201);
+  });
+
+  app.get("/artifacts/:id/comments", async (c) => {
+    const id = c.req.param("id");
+    if (!(await c.get("store").getArtifactGate(id))) return errorResponse("not_found", "Artifact not found.");
+    const { comments, truncated } = await c.get("store").listComments(id);
+    return c.json({
+      artifact_id: id,
+      comments: comments.map(commentJson),
+      ...(truncated ? { truncated: true } : {}),
+    });
+  });
+
+  app.delete("/comments/:cid", async (c) => {
+    const result = await c.get("store").deleteComment(c.req.param("cid"));
+    if (!result) return errorResponse("not_found", "Comment not found.");
+    return c.json({ id: result.id, deleted_at: result.deletedAt });
   });
 
   return app;

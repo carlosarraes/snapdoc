@@ -4,7 +4,7 @@ import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
-import { artifactJson, errorResponse, parseDuration, versionJson } from "./http";
+import { artifactJson, commentJson, errorResponse, parseDuration, versionJson } from "./http";
 import type { Env } from "./types";
 
 interface ApiVariables {
@@ -194,6 +194,18 @@ export function createPublisherApp(): Hono<ApiContext> {
     return c.json({
       artifact: artifactJson(found.artifact, c.env),
       versions: found.versions.map(versionJson),
+    });
+  });
+
+  app.get("/artifacts/:id/comments", async (c) => {
+    const store = c.get("store");
+    const id = c.req.param("id");
+    if (!(await store.getArtifactGate(id))) return errorResponse("not_found", "Artifact not found.");
+    const { comments, truncated } = await store.listComments(id);
+    return c.json({
+      artifact_id: id,
+      comments: comments.map(commentJson),
+      ...(truncated ? { truncated: true } : {}),
     });
   });
 

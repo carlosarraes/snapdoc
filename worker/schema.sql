@@ -35,6 +35,18 @@ CREATE TABLE IF NOT EXISTS publish_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS comments (
+  id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  version INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_comments_artifact ON comments(artifact_id, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_publish_events_token_time ON publish_events(token_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_status_expires ON artifacts(status, expires_at);

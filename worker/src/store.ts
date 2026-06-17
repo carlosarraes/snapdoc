@@ -24,6 +24,15 @@ export interface ArtifactVersion {
   createdAt: string;
 }
 
+export interface Comment {
+  id: string;
+  artifactId: string;
+  version: number;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
 export interface TokenRecord {
   id: string;
   name: string;
@@ -54,6 +63,7 @@ const ARTIFACT_ID_LENGTH = 14;
 // Blobs of expired artifacts are retained for a grace period (so version history
 // survives a quick reactivation) before the cron purge removes them.
 const EXPIRED_BLOB_RETENTION_SECONDS = 7 * 86400;
+const COMMENTS_LIMIT = 500;
 
 function randomId(length: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(length));
@@ -440,6 +450,58 @@ export class Store {
     const object = await this.blobs.get(row.r2_key);
     if (!object) return null;
     return { state: "active", html: await object.text(), contentType: row.content_type };
+  }
+
+  // ---- comments (doc-level threads; authored by team via Access, read by agents) ----
+
+  async addComment(artifactId: string, input: { author: string; body: string }): Promise<Comment> {
+    const current = await this.fetchArtifact(artifactId);
+    if (!current) throw new StoreError("not_found", "Artifact not found.");
+    if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    const id = `cmt_${randomId(16)}`;
+    const createdAt = isoNow();
+    const version = current.currentVersion;
+    await this.db
+      .prepare("INSERT INTO comments (id, artifact_id, version, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+      .bind(id, artifactId, version, input.author, input.body, createdAt)
+      .run();
+    return { id, artifactId, version, author: input.author, body: input.body, createdAt };
+  }
+
+  async listComments(artifactId: string): Promise<{ comments: Comment[]; truncated: boolean }> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT id, artifact_id, version, author, body, created_at FROM comments
+         WHERE artifact_id = ?1 AND deleted_at IS NULL
+         ORDER BY created_at ASC, rowid ASC LIMIT ?2`,
+      )
+      .bind(artifactId, COMMENTS_LIMIT + 1)
+      .all<{ id: string; artifact_id: string; version: number; author: string; body: string; created_at: string }>();
+    const truncated = results.length > COMMENTS_LIMIT;
+    const page = truncated ? results.slice(0, COMMENTS_LIMIT) : results;
+    return {
+      comments: page.map((r) => ({
+        id: r.id,
+        artifactId: r.artifact_id,
+        version: r.version,
+        author: r.author,
+        body: r.body,
+        createdAt: r.created_at,
+      })),
+      truncated,
+    };
+  }
+
+  async deleteComment(commentId: string): Promise<{ id: string; deletedAt: string } | null> {
+    const row = await this.db
+      .prepare("SELECT id, deleted_at FROM comments WHERE id = ?1")
+      .bind(commentId)
+      .first<{ id: string; deleted_at: string | null }>();
+    if (!row) return null;
+    if (row.deleted_at) return { id: row.id, deletedAt: row.deleted_at };
+    const deletedAt = isoNow();
+    await this.db.prepare("UPDATE comments SET deleted_at = ?1 WHERE id = ?2").bind(deletedAt, commentId).run();
+    return { id: commentId, deletedAt };
   }
 
   // ---- rate limiting (sliding one-hour window over publish events) ----

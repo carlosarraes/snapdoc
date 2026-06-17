@@ -1,5 +1,5 @@
 // Shared HTTP helpers: error envelope, artifact JSON shape, duration parsing.
-import type { Artifact, ArtifactVersion, StoreErrorCode } from "./store";
+import type { Artifact, ArtifactVersion, Comment, StoreErrorCode } from "./store";
 import type { Env } from "./types";
 
 export type ErrorCode =
@@ -53,6 +53,16 @@ export function artifactJson(artifact: Artifact, env: Env, opts: { admin?: boole
   };
   if (opts.admin) json.token_name = artifact.tokenName ?? null;
   return json;
+}
+
+export function commentJson(comment: Comment) {
+  return {
+    id: comment.id,
+    author: comment.author,
+    version: comment.version,
+    body: comment.body,
+    created_at: comment.createdAt,
+  };
 }
 
 export function versionJson(version: ArtifactVersion) {
