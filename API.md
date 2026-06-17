@@ -130,6 +130,25 @@ the stored artifact title when no `?title=` is given.
 }
 ```
 
+### GET /v1/artifacts/{id}/comments — read comments (the agent loop)
+
+- Token-gated (any valid team token). Returns all non-deleted comments, oldest-first.
+- 200 →
+
+```json
+{
+  "artifact_id": "x7Kp9qWm2AbCdE",
+  "comments": [
+    { "id": "cmt_…", "author": "jane@team.com", "version": 2,
+      "body": "Tighten the intro.", "created_at": "2026-06-17T15:04:05Z" }
+  ]
+}
+```
+
+- `version` is the artifact's `current_version` when the comment was posted. A
+  `"truncated": true` flag appears if the (500) cap is hit. 404 `not_found` if the
+  artifact does not exist.
+
 ### POST /v1/artifacts/{id}/expire — expire now
 
 - Idempotent: expiring an already-expired artifact is a 200.
@@ -158,6 +177,18 @@ scoped to a creator and includes `token_name`). Additionally:
 ### DELETE /v1/admin/tokens/{id}
 
 - Revokes (idempotent). 200 → `{ "id": "...", "revoked_at": "..." }`.
+
+### Comments (write + moderate)
+
+Humans author comments through Cloudflare Access (the future dashboard); agents
+read them via the token endpoint above. `author` comes from the Access JWT `email`
+claim — never a client field.
+
+- `POST /v1/admin/artifacts/{id}/comments` — body `{ "body": "…" }` (≤8 KB else
+  `invalid_request`). 201 → Comment object. 404 `not_found` / 409 `not_active`
+  (deleted artifact).
+- `GET /v1/admin/artifacts/{id}/comments` — same shape as the token read, for the dashboard.
+- `DELETE /v1/admin/comments/{cid}` — soft-delete (idempotent). 200 → `{ "id", "deleted_at" }`.
 
 ### Bootstrap
 

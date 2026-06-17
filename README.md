@@ -44,6 +44,7 @@ cat plan.md | snapdoc publish - --markdown --quiet
 | `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--quiet/-q` |
 | `list` | List your artifacts. Flags: `--status`, `--all` |
 | `get <id>` | Show artifact metadata and version history |
+| `comments <id>` | Read feedback left on an artifact |
 | `open <id>` | Open an artifact in the browser |
 | `expire <id>` | Expire an artifact now (URL stops serving) |
 | `delete <id>` | Delete an artifact and its content |
@@ -54,6 +55,10 @@ cat plan.md | snapdoc publish - --markdown --quiet
 `--json` (global) prints raw JSON instead of human text — handy for scripts and agents.
 `--passcode` protects a new artifact; viewers get a browser unlock page. Markdown
 bodies may carry `---` frontmatter (`title`, `toc: true`); headings get anchor links.
+
+**Feedback loop:** teammates comment on an artifact (via the Access-gated dashboard),
+and an agent reads that feedback back with `snapdoc comments <id>` to inform the next
+version — closing the publish → review → iterate loop.
 
 `--update <id>` publishes a new version while keeping the same stable URL;
 every other publish mints a new immutable artifact.
