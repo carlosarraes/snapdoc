@@ -106,6 +106,9 @@ h2 .prompt { color: var(--accent); margin-right: 8px; }
 
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
+/* Row actions stay on one line, aligned right. */
+.actions { display: flex; gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
+td:has(.actions) { white-space: nowrap; width: 1%; }
 
 /* ---- controls ---- */
 input, select, textarea {

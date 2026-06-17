@@ -124,7 +124,7 @@ export function Artifacts() {
                 <td className="muted">{formatDate(a.expires_at)}</td>
                 <td className="muted">{a.token_name ?? "—"}</td>
                 <td>
-                  <div className="row">
+                  <div className="actions">
                     <CopyButton text={a.url} label="url" />
                     {a.status === "active" && (
                       <button className="btn btn-sm" onClick={() => expire(a)}>
