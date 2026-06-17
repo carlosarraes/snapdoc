@@ -14,17 +14,19 @@ function Layout() {
   return (
     <>
       <header className="topbar">
-        <span className="brand">
-          <span className="prompt">$</span>snapdoc admin<span className="cursor" />
-        </span>
-        <nav>
-          <NavLink to="/" end className={navClass}>
-            artifacts
-          </NavLink>
-          <NavLink to="/tokens" className={navClass}>
-            tokens
-          </NavLink>
-        </nav>
+        <div className="bar">
+          <span className="brand">
+            <span className="prompt">$</span>snapdoc admin<span className="cursor" />
+          </span>
+          <nav>
+            <NavLink to="/" end className={navClass}>
+              artifacts
+            </NavLink>
+            <NavLink to="/tokens" className={navClass}>
+              tokens
+            </NavLink>
+          </nav>
+        </div>
       </header>
       <main>
         <Outlet />

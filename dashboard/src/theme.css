@@ -11,6 +11,7 @@
   --amber: #d29922;
   --red: #f85149;
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --content: 1320px;
 }
 
 * {
@@ -42,13 +43,18 @@ a:hover {
   position: sticky;
   top: 0;
   z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  padding: 14px 24px;
   background: rgba(13, 17, 23, 0.85);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
+}
+/* Inner container shares the content width so the brand + nav align with the table. */
+.bar {
+  max-width: var(--content);
+  margin: 0 auto;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 28px;
 }
 .brand {
   font-size: 16px;
@@ -89,7 +95,7 @@ nav a.active {
 }
 
 main {
-  max-width: 1080px;
+  max-width: var(--content);
   margin: 0 auto;
   padding: 28px 24px 80px;
   animation: fade 0.3s ease-out both;
