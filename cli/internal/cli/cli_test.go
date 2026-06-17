@@ -25,12 +25,13 @@ const artifactJSON = `{
 }`
 
 type recordedReq struct {
-	method string
-	path   string
-	query  map[string]string
-	auth   string
-	ctype  string
-	body   string
+	method   string
+	path     string
+	query    map[string]string
+	auth     string
+	ctype    string
+	passcode string
+	body     string
 }
 
 type fakeServer struct {
@@ -49,12 +50,13 @@ func newFakeServer(t *testing.T, handler func(r recordedReq, w http.ResponseWrit
 			q[k] = v[0]
 		}
 		req := recordedReq{
-			method: r.Method,
-			path:   r.URL.Path,
-			query:  q,
-			auth:   r.Header.Get("Authorization"),
-			ctype:  r.Header.Get("Content-Type"),
-			body:   string(b),
+			method:   r.Method,
+			path:     r.URL.Path,
+			query:    q,
+			auth:     r.Header.Get("Authorization"),
+			ctype:    r.Header.Get("Content-Type"),
+			passcode: r.Header.Get("X-Snapdoc-Passcode"),
+			body:     string(b),
 		}
 		fs.reqs = append(fs.reqs, req)
 		w.Header().Set("Content-Type", "application/json")
@@ -814,5 +816,45 @@ func TestOpenCommand(t *testing.T) {
 	}
 	if len(srv.reqs) == 0 || srv.reqs[0].method != "GET" || srv.reqs[0].path != "/v1/artifacts/x7Kp9qWm2AbCdE" {
 		t.Errorf("expected GET /v1/artifacts/x7Kp9qWm2AbCdE, got %+v", srv.reqs)
+	}
+}
+
+func TestPublishPasscodeHeader(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	_, _, code := runCLI([]string{"publish", "--passcode", "hunter2", "-"}, "<h1>hi</h1>")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "hunter2" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want hunter2", srv.reqs[0].passcode)
+	}
+}
+
+func TestPublishNoPasscodeNoHeader(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	runCLI([]string{"publish", "-"}, "x")
+	if srv.reqs[0].passcode != "" {
+		t.Errorf("unexpected passcode header %q", srv.reqs[0].passcode)
+	}
+}
+
+func TestGetShowsPasscodeIndicator(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact":{"id":"x7Kp9qWm2AbCdE","url":"u","title":"t","status":"active","current_version":1,"content_type":"text/html","size_bytes":1,"created_at":"c","expires_at":"e","has_passcode":true},"versions":[]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"get", "x7Kp9qWm2AbCdE"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "passcode") {
+		t.Errorf("get output missing passcode indicator:\n%s", stdout)
 	}
 }

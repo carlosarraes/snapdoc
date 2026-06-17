@@ -46,6 +46,7 @@ type Artifact struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	CreatedAt      string `json:"created_at"`
 	ExpiresAt      string `json:"expires_at"`
+	HasPasscode    bool   `json:"has_passcode"`
 	TokenName      string `json:"token_name,omitempty"`
 }
 
@@ -57,8 +58,9 @@ type Version struct {
 }
 
 type PublishOptions struct {
-	Title string
-	TTL   string
+	Title    string
+	TTL      string
+	Passcode string
 }
 
 type ListOptions struct {
@@ -117,8 +119,13 @@ func (c *Client) publish(path string, content io.Reader, contentType string, opt
 	if opts.TTL != "" {
 		q.Set("ttl", opts.TTL)
 	}
+	var headers map[string]string
+	if opts.Passcode != "" {
+		// Header, not a query param: query strings get logged.
+		headers = map[string]string{"X-Snapdoc-Passcode": opts.Passcode}
+	}
 	var a Artifact
-	if err := c.do("POST", path, q, content, contentType, &a); err != nil {
+	if err := c.doH("POST", path, q, content, contentType, headers, &a); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -201,6 +208,10 @@ func (c *Client) RevokeToken(id string) (*RevokeResult, error) {
 }
 
 func (c *Client) do(method, path string, q url.Values, body io.Reader, contentType string, out any) error {
+	return c.doH(method, path, q, body, contentType, nil, out)
+}
+
+func (c *Client) doH(method, path string, q url.Values, body io.Reader, contentType string, headers map[string]string, out any) error {
 	u := strings.TrimRight(c.BaseURL, "/") + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
@@ -214,6 +225,9 @@ func (c *Client) do(method, path string, q url.Values, body io.Reader, contentTy
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	httpClient := c.HTTP
 	if httpClient == nil {

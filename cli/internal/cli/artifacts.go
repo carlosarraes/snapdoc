@@ -82,6 +82,9 @@ func (c *GetCmd) Run(g *Globals, streams *IO) error {
 	fmt.Fprintf(streams.Stdout, "Size:     %d bytes\n", a.SizeBytes)
 	fmt.Fprintf(streams.Stdout, "Created:  %s\n", a.CreatedAt)
 	fmt.Fprintf(streams.Stdout, "Expires:  %s\n", a.ExpiresAt)
+	if a.HasPasscode {
+		fmt.Fprintf(streams.Stdout, "Passcode: required\n")
+	}
 	fmt.Fprintf(streams.Stdout, "URL:      %s\n", a.URL)
 	fmt.Fprintln(streams.Stdout)
 

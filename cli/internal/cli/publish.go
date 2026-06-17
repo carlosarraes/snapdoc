@@ -17,6 +17,7 @@ type PublishCmd struct {
 	TTL      string `help:"Time to live, e.g. 12h, 7d (server-validated)."`
 	Update   string `help:"Artifact ID to update with a new version." placeholder:"ID"`
 	Markdown bool   `help:"Treat input as Markdown (auto-detected for .md/.markdown files)."`
+	Passcode string `help:"Protect a new artifact with a passcode (applies only when creating)."`
 	Quiet    bool   `short:"q" help:"Print only the artifact URL."`
 }
 
@@ -39,6 +40,7 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 	if p.Update != "" {
 		artifact, err = client.PublishVersion(p.Update, bytes.NewReader(content), contentType, opts)
 	} else {
+		opts.Passcode = p.Passcode // passcode is set only when creating an artifact
 		artifact, err = client.Publish(bytes.NewReader(content), contentType, opts)
 	}
 	if err != nil {
