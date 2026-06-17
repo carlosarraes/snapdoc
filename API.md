@@ -67,11 +67,13 @@ Stable error codes (clients must switch on `code`, never on `message`):
   "size_bytes": 48213,
   "created_at": "2026-06-12T15:04:05Z",
   "expires_at": "2026-06-26T15:04:05Z",
+  "has_passcode": false,
   "token_name": "carraes-laptop"
 }
 ```
 
-`status` ∈ `active | expired | deleted`. `token_name` appears only in admin responses.
+`status` ∈ `active | expired | deleted`. `has_passcode` is true when the artifact
+is passcode-protected. `token_name` appears only in admin responses.
 
 ## Publisher endpoints (Bearer token)
 
@@ -83,7 +85,18 @@ Stable error codes (clients must switch on `code`, never on `message`):
 - Query params:
   - `title` (optional, ≤200 chars)
   - `ttl` (optional, duration string: `12h`, `7d`, `90d`; default `14d`)
+- Headers:
+  - `X-Snapdoc-Passcode` (optional) — protects the new artifact with a passcode.
+    Sent as a header rather than a query param so it is not logged. Hashed with
+    PBKDF2 server-side; never stored or returned in plaintext. Only honored on
+    create (ignored on version updates).
 - 201 → Artifact object (version 1).
+
+**Markdown frontmatter.** A `text/markdown` body may begin with a `---` YAML-ish
+frontmatter block; recognized keys: `title` (string) and `toc` (`true` to prepend
+a table of contents). Heading anchors are always added. Title precedence:
+explicit `?title=` > frontmatter `title` > default. The frontmatter title becomes
+the stored artifact title when no `?title=` is given.
 
 ### POST /v1/artifacts/{id}/versions — publish new version (update)
 
@@ -161,10 +174,18 @@ intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there
 | `/` and non-ID paths | Static assets (landing) |
 | `/{id}` | 200 latest version HTML; 404 missing; 410 expired/deleted (distinct friendly pages) |
 | `/{id}/v/{n}` | Version-pinned; same state rules |
+| `POST /{id}/unlock` | Passcode entry: form field `passcode`; 303 + viewer cookie on success, 401 unlock page on failure |
 
 Headers on artifact responses: `X-Robots-Tag: noindex, nofollow`,
 `Content-Security-Policy` allowing self-contained inline CSS/JS but no privileged reach,
 `Cache-Control: public, max-age=60` for active artifacts only.
+
+**Passcode gate.** When an artifact is passcode-protected, `GET /{id}` returns a
+200 unlock page (its own CSP relaxes `form-action` to `'self'`) unless the request
+carries a valid `sd_unlock_{id}` cookie. The cookie is an HMAC of the stored hash,
+set by `POST /{id}/unlock` (HttpOnly, Secure, SameSite=Lax, Path=`/{id}`, 12h).
+Protected content is served `Cache-Control: private, no-store` so shared caches
+never hold it.
 
 ## Versioning of this contract
 

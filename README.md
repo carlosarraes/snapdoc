@@ -41,14 +41,19 @@ cat plan.md | snapdoc publish - --markdown --quiet
 
 | Command | Description |
 |---------|-------------|
-| `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--quiet/-q` |
+| `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--quiet/-q` |
 | `list` | List your artifacts. Flags: `--status`, `--all` |
 | `get <id>` | Show artifact metadata and version history |
+| `open <id>` | Open an artifact in the browser |
 | `expire <id>` | Expire an artifact now (URL stops serving) |
 | `delete <id>` | Delete an artifact and its content |
 | `token create <name>` | Mint an API token (admin). `--bootstrap` uses `SNAPDOC_BOOTSTRAP` |
 | `token list` / `token revoke <id>` | Manage tokens (admin) |
 | `login` | Save API URL and token to the config file |
+
+`--json` (global) prints raw JSON instead of human text — handy for scripts and agents.
+`--passcode` protects a new artifact; viewers get a browser unlock page. Markdown
+bodies may carry `---` frontmatter (`title`, `toc: true`); headings get anchor links.
 
 `--update <id>` publishes a new version while keeping the same stable URL;
 every other publish mints a new immutable artifact.
