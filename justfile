@@ -82,7 +82,11 @@ release new_version:
     go test {{cli_dir}}/...
     printf '%s\n' "$ver" > VERSION
     git add VERSION
-    git commit -m "chore: release v$ver"
+    if git diff --cached --quiet; then
+        echo "VERSION already at $ver; tagging the current commit"
+    else
+        git commit -m "chore: release v$ver"
+    fi
     git tag -a "v$ver" -m "v$ver"
     git push origin HEAD
     git push origin "v$ver"
