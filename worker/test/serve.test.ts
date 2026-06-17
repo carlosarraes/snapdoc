@@ -106,3 +106,12 @@ describe("favicon fallback", () => {
     expect(res.headers.get("Content-Type")).toContain("svg");
   });
 });
+
+describe("admin paths are not served on the artifact host", () => {
+  it("returns 404 for /admin and /admin/* on the artifact origin", async () => {
+    for (const path of ["/admin", "/admin/", "/admin/assets/app.js"]) {
+      const res = await SELF.fetch(`${ARTIFACT_BASE}${path}`);
+      expect(res.status).toBe(404);
+    }
+  });
+});

@@ -174,6 +174,16 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
     return logo;
   }
 
+  // The dashboard lives only on the API host. Never serve its assets from the
+  // public artifact origin (they'd be unauthenticated and non-functional here).
+  if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+    return statusPage({
+      status: 404,
+      heading: "Not found",
+      message: "This page does not exist on the artifact host.",
+    });
+  }
+
   const store = new Store(env.DB, env.BLOBS);
 
   const unlockMatch = UNLOCK_PATTERN.exec(url.pathname);
