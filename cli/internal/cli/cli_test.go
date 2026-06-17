@@ -858,3 +858,53 @@ func TestGetShowsPasscodeIndicator(t *testing.T) {
 		t.Errorf("get output missing passcode indicator:\n%s", stdout)
 	}
 }
+
+func TestCommentsReadsAndRenders(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact_id":"x7Kp9qWm2AbCdE","comments":[{"id":"cmt_1","author":"jane@team.com","version":2,"body":"tighten intro","created_at":"2026-06-17T10:00:00Z"}]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"comments", "x7Kp9qWm2AbCdE"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].method != "GET" || srv.reqs[0].path != "/v1/artifacts/x7Kp9qWm2AbCdE/comments" {
+		t.Errorf("req = %s %s", srv.reqs[0].method, srv.reqs[0].path)
+	}
+	if !strings.Contains(stdout, "jane@team.com") || !strings.Contains(stdout, "tighten intro") {
+		t.Errorf("output missing comment:\n%s", stdout)
+	}
+}
+
+func TestCommentsJSON(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"artifact_id":"x","comments":[{"id":"cmt_1","author":"a","version":1,"body":"b","created_at":"c"}]}`)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"comments", "x", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("not JSON: %s", stdout)
+	}
+	if _, ok := m["comments"]; !ok {
+		t.Error("missing comments key")
+	}
+}
+
+func TestCommentsEmpty(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"artifact_id":"x","comments":[]}`)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"comments", "x"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "no comments") {
+		t.Errorf("expected empty message:\n%s", stdout)
+	}
+}

@@ -57,14 +57,15 @@ type CLI struct {
 
 	Version kong.VersionFlag `help:"Print version and exit."`
 
-	Publish PublishCmd `cmd:"" help:"Publish an HTML or Markdown artifact from a file or stdin."`
-	List    ListCmd    `cmd:"" help:"List your artifacts."`
-	Get     GetCmd     `cmd:"" help:"Show artifact metadata and versions."`
-	Open    OpenCmd    `cmd:"" help:"Open an artifact in the browser."`
-	Delete  DeleteCmd  `cmd:"" help:"Delete an artifact."`
-	Expire  ExpireCmd  `cmd:"" help:"Expire an artifact now."`
-	Token   TokenCmd   `cmd:"" help:"Manage API tokens (admin)."`
-	Login   LoginCmd   `cmd:"" help:"Save API URL and token to the config file."`
+	Publish  PublishCmd  `cmd:"" help:"Publish an HTML or Markdown artifact from a file or stdin."`
+	List     ListCmd     `cmd:"" help:"List your artifacts."`
+	Get      GetCmd      `cmd:"" help:"Show artifact metadata and versions."`
+	Comments CommentsCmd `cmd:"" help:"Read comments on an artifact."`
+	Open     OpenCmd     `cmd:"" help:"Open an artifact in the browser."`
+	Delete   DeleteCmd   `cmd:"" help:"Delete an artifact."`
+	Expire   ExpireCmd   `cmd:"" help:"Expire an artifact now."`
+	Token    TokenCmd    `cmd:"" help:"Manage API tokens (admin)."`
+	Login    LoginCmd    `cmd:"" help:"Save API URL and token to the config file."`
 }
 
 // Run parses args and executes the selected command, returning the process

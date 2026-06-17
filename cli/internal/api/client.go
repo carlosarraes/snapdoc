@@ -83,6 +83,20 @@ type DeleteResult struct {
 	Status string `json:"status"`
 }
 
+type Comment struct {
+	ID        string `json:"id"`
+	Author    string `json:"author"`
+	Version   int    `json:"version"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+}
+
+type CommentsResult struct {
+	ArtifactID string    `json:"artifact_id"`
+	Comments   []Comment `json:"comments"`
+	Truncated  bool      `json:"truncated"`
+}
+
 type TokenSecret struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -149,6 +163,14 @@ func (c *Client) List(opts ListOptions) (*ListResult, error) {
 func (c *Client) Get(id string) (*GetResult, error) {
 	var res GetResult
 	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id), nil, nil, "", &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *Client) ListComments(id string) (*CommentsResult, error) {
+	var res CommentsResult
+	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id)+"/comments", nil, nil, "", &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
