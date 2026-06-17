@@ -45,6 +45,14 @@ check:
 dev:
     @cd {{worker_dir}} && npm run dev
 
+# Run the dashboard dev server (Vite + HMR; proxies /v1 to `just dev` on :8787)
+dashboard-dev:
+    @cd dashboard && npm run dev
+
+# Build the dashboard SPA into the worker's static assets (worker/public/admin)
+dashboard-build:
+    @cd dashboard && npm run build
+
 # Apply schema to the local D1 database
 migrate-local:
     @cd {{worker_dir}} && npm run db:migrate:local
@@ -53,8 +61,8 @@ migrate-local:
 migrate-remote:
     @cd {{worker_dir}} && npm run db:migrate:remote
 
-# Deploy the worker (uploads public/ assets too)
-deploy:
+# Deploy the worker (builds the dashboard, then uploads public/ assets too)
+deploy: dashboard-build
     @cd {{worker_dir}} && npx wrangler deploy
 
 # Print the current version
