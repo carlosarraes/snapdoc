@@ -57,12 +57,17 @@ a:hover {
   gap: 28px;
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 16px;
   font-weight: 600;
 }
-.brand .prompt {
-  color: var(--accent);
-  margin-right: 8px;
+.brand .logo {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 .brand .cursor {
   display: inline-block;

@@ -16,7 +16,15 @@ function Layout() {
       <header className="topbar">
         <div className="bar">
           <span className="brand">
-            <span className="prompt">$</span>snapdoc admin<span className="cursor" />
+            <svg className="logo" viewBox="0 0 32 32" aria-hidden="true">
+              <rect width="32" height="32" rx="6" fill="#0d1117" />
+              <text x="7" y="23" fontFamily="monospace" fontSize="18" fontWeight="bold" fill="#3fb950">
+                $_
+              </text>
+            </svg>
+            <span className="wordmark">
+              snapdoc<span className="cursor" />
+            </span>
           </span>
           <nav>
             <NavLink to="/" end className={navClass}>
