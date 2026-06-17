@@ -45,6 +45,9 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 		return err
 	}
 
+	if g.JSON {
+		return writeJSON(streams.Stdout, artifact)
+	}
 	if p.Quiet {
 		fmt.Fprintln(streams.Stdout, artifact.URL)
 		return nil

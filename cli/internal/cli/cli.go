@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,15 @@ type IO struct {
 type Globals struct {
 	APIURL string `name:"api-url" help:"API base URL (overrides config and SNAPDOC_API_URL)." env:"SNAPDOC_API_URL"`
 	Token  string `help:"API token (overrides config and SNAPDOC_TOKEN)." env:"SNAPDOC_TOKEN"`
+	JSON   bool   `help:"Output raw JSON instead of human-readable text."`
+}
+
+// writeJSON emits v as indented JSON, the machine-readable form of a command's
+// result. Used by publish/list/get when --json is set.
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 // client resolves configuration with precedence flag > env > file > default.
@@ -50,6 +60,7 @@ type CLI struct {
 	Publish PublishCmd `cmd:"" help:"Publish an HTML or Markdown artifact from a file or stdin."`
 	List    ListCmd    `cmd:"" help:"List your artifacts."`
 	Get     GetCmd     `cmd:"" help:"Show artifact metadata and versions."`
+	Open    OpenCmd    `cmd:"" help:"Open an artifact in the browser."`
 	Delete  DeleteCmd  `cmd:"" help:"Delete an artifact."`
 	Expire  ExpireCmd  `cmd:"" help:"Expire an artifact now."`
 	Token   TokenCmd   `cmd:"" help:"Manage API tokens (admin)."`

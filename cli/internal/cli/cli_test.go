@@ -711,3 +711,108 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatal("--version printed nothing")
 	}
 }
+
+func TestPublishJSONOutput(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"publish", "--json", "-"}, "<h1>hi</h1>")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if m["id"] != "x7Kp9qWm2AbCdE" {
+		t.Errorf("id = %v", m["id"])
+	}
+	if m["url"] == "" || m["url"] == nil {
+		t.Error("missing url in JSON output")
+	}
+}
+
+func TestPublishJSONBeatsQuiet(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"publish", "--json", "--quiet", "-"}, "x")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("--json should win over --quiet, got: %s", stdout)
+	}
+	if m["id"] != "x7Kp9qWm2AbCdE" {
+		t.Errorf("id = %v", m["id"])
+	}
+}
+
+func TestListJSONOutput(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifacts":[{"id":"a1","url":"u1","title":"t","status":"active","current_version":1,"content_type":"text/html","size_bytes":1,"created_at":"c","expires_at":"e"}],"next_cursor":""}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"list", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	arr, ok := m["artifacts"].([]any)
+	if !ok || len(arr) != 1 {
+		t.Errorf("artifacts = %v", m["artifacts"])
+	}
+}
+
+func TestGetJSONOutput(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact":` + artifactJSON + `,"versions":[{"version":1,"size_bytes":1,"content_type":"text/html","created_at":"c"}]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"get", "x7Kp9qWm2AbCdE", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	if _, ok := m["artifact"]; !ok {
+		t.Error("missing artifact key")
+	}
+	if _, ok := m["versions"]; !ok {
+		t.Error("missing versions key")
+	}
+}
+
+func TestOpenCommand(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact":` + artifactJSON + `,"versions":[]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+
+	var opened string
+	orig := openURL
+	openURL = func(u string) error { opened = u; return nil }
+	defer func() { openURL = orig }()
+
+	_, _, code := runCLI([]string{"open", "x7Kp9qWm2AbCdE"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if opened != "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE" {
+		t.Errorf("opened = %q", opened)
+	}
+	if len(srv.reqs) == 0 || srv.reqs[0].method != "GET" || srv.reqs[0].path != "/v1/artifacts/x7Kp9qWm2AbCdE" {
+		t.Errorf("expected GET /v1/artifacts/x7Kp9qWm2AbCdE, got %+v", srv.reqs)
+	}
+}

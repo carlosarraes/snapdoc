@@ -20,6 +20,7 @@ func (l *ListCmd) Run(g *Globals, streams *IO) error {
 
 	var artifacts []api.Artifact
 	cursor := ""
+	nextCursor := ""
 	moreAvailable := false
 	for {
 		res, err := client.List(api.ListOptions{Status: l.Status, Cursor: cursor})
@@ -31,10 +32,15 @@ func (l *ListCmd) Run(g *Globals, streams *IO) error {
 			break
 		}
 		if !l.All {
+			nextCursor = res.NextCursor
 			moreAvailable = true
 			break
 		}
 		cursor = res.NextCursor
+	}
+
+	if g.JSON {
+		return writeJSON(streams.Stdout, api.ListResult{Artifacts: artifacts, NextCursor: nextCursor})
 	}
 
 	w := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
@@ -63,6 +69,9 @@ func (c *GetCmd) Run(g *Globals, streams *IO) error {
 	res, err := client.Get(c.ID)
 	if err != nil {
 		return err
+	}
+	if g.JSON {
+		return writeJSON(streams.Stdout, res)
 	}
 	a := res.Artifact
 	fmt.Fprintf(streams.Stdout, "ID:       %s\n", a.ID)
