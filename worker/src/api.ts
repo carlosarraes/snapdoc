@@ -25,6 +25,7 @@ interface PublishInput {
   contentType: "text/html";
   title: string | null;
   ttlSeconds?: number;
+  passcode?: string;
 }
 
 // Validates the shared publish inputs (content type, size, ttl, title) and
@@ -81,7 +82,9 @@ export async function readPublishInput(
     // Fall back to a frontmatter title when no explicit ?title= was given.
     if (resolvedTitle === null) resolvedTitle = rendered.title;
   }
-  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds };
+  // Passcode travels in a header (not a query param, which would be logged).
+  const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
+  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds, passcode };
 }
 
 async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promise<Response | null> {
@@ -143,6 +146,7 @@ export function createPublisherApp(): Hono<ApiContext> {
       ttlSeconds: input.ttlSeconds ?? parseDuration(c.env.DEFAULT_TTL)!,
       contentType: input.contentType,
       body: input.body,
+      passcode: input.passcode,
     });
     await store.recordPublish(token.id);
     return c.json(artifactJson(artifact, c.env), 201);

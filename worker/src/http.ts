@@ -49,6 +49,7 @@ export function artifactJson(artifact: Artifact, env: Env, opts: { admin?: boole
     size_bytes: artifact.sizeBytes,
     created_at: artifact.createdAt,
     expires_at: artifact.expiresAt,
+    has_passcode: artifact.hasPasscode,
   };
   if (opts.admin) json.token_name = artifact.tokenName ?? null;
   return json;

@@ -15,7 +15,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
   current_version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  blobs_purged_at TEXT
+  blobs_purged_at TEXT,
+  passcode_hash TEXT,
+  passcode_salt TEXT
 );
 
 CREATE TABLE IF NOT EXISTS versions (

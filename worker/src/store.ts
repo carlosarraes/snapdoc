@@ -14,6 +14,7 @@ export interface Artifact {
   expiresAt: string;
   tokenId: string;
   tokenName?: string;
+  hasPasscode: boolean;
 }
 
 export interface ArtifactVersion {
@@ -63,7 +64,57 @@ function randomId(length: number): string {
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  return Uint8Array.from(hex.match(/.{2}/g)!.map((h) => parseInt(h, 16)));
+}
+
+// Passcodes are low-entropy, so derive a slow salted hash (PBKDF2) rather than a
+// bare SHA-256 — resists brute force if the metadata DB ever leaks.
+const PASSCODE_ITERATIONS = 100_000;
+
+async function derivePasscodeHash(passcode: string, saltHex: string): Promise<string> {
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passcode),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: PASSCODE_ITERATIONS, hash: "SHA-256" },
+    keyMaterial,
+    256,
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+// Opaque viewer token = HMAC(key = stored passcode hash, msg = artifact id).
+// Verifiable server-side from the stored hash, so no session table or extra
+// secret is needed; knowing it proves the holder already cleared the passcode.
+async function deriveViewerToken(passcodeHashHex: string, id: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    hexToBytes(passcodeHashHex),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(id));
+  return bytesToHex(new Uint8Array(sig));
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 function isoNow(now?: Date): string {
@@ -86,6 +137,7 @@ interface ArtifactRow {
   expires_at: string;
   content_type: string;
   size_bytes: number;
+  has_passcode: number;
 }
 
 function rowToArtifact(row: ArtifactRow): Artifact {
@@ -99,6 +151,7 @@ function rowToArtifact(row: ArtifactRow): Artifact {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     tokenId: row.token_id,
+    hasPasscode: !!row.has_passcode,
   };
   if (row.token_name !== undefined) artifact.tokenName = row.token_name;
   return artifact;
@@ -109,6 +162,7 @@ function rowToArtifact(row: ArtifactRow): Artifact {
 const ARTIFACT_SELECT = `
   SELECT a.id, a.title, a.status, a.token_id, a.current_version, a.created_at, a.expires_at,
          CASE WHEN a.status = 'active' AND a.expires_at <= ?1 THEN 'expired' ELSE a.status END AS effective_status,
+         (a.passcode_hash IS NOT NULL) AS has_passcode,
          v.content_type, v.size_bytes,
          t.name AS token_name
   FROM artifacts a
@@ -182,22 +236,77 @@ export class Store {
     ttlSeconds: number;
     contentType: string;
     body: string;
+    passcode?: string;
   }): Promise<Artifact> {
     const id = randomId(ARTIFACT_ID_LENGTH);
     const now = new Date();
     const createdAt = isoNow(now);
     const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
     const sizeBytes = new TextEncoder().encode(input.body).byteLength;
+
+    let passcodeHash: string | null = null;
+    let passcodeSalt: string | null = null;
+    if (input.passcode) {
+      passcodeSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      passcodeHash = await derivePasscodeHash(input.passcode, passcodeSalt);
+    }
+
     await this.blobs.put(r2Key(id, 1), input.body, { httpMetadata: { contentType: input.contentType } });
     await this.db.batch([
       this.db
-        .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5)")
-        .bind(id, input.title, input.tokenId, createdAt, expiresAt),
+        .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7)")
+        .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt),
       this.db
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)")
         .bind(id, r2Key(id, 1), input.contentType, sizeBytes, createdAt),
     ]);
     return (await this.fetchArtifact(id))!;
+  }
+
+  // ---- passcode access control ----
+
+  // Lightweight routing check for the serving layer: effective status + whether
+  // a passcode gate applies, without reading the blob.
+  async getArtifactGate(id: string): Promise<{ status: ArtifactStatus; hasPasscode: boolean } | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT CASE WHEN status = 'active' AND expires_at <= ?1 THEN 'expired' ELSE status END AS effective_status,
+                passcode_hash
+         FROM artifacts WHERE id = ?2`,
+      )
+      .bind(isoNow(), id)
+      .first<{ effective_status: string; passcode_hash: string | null }>();
+    if (!row) return null;
+    return { status: row.effective_status as ArtifactStatus, hasPasscode: row.passcode_hash !== null };
+  }
+
+  async verifyPasscode(id: string, passcode: string): Promise<boolean> {
+    const row = await this.fetchPasscode(id);
+    if (!row) return false;
+    const candidate = await derivePasscodeHash(passcode, row.salt);
+    return constantTimeEqual(candidate, row.hash);
+  }
+
+  // Token to store in the viewer's cookie after a correct unlock.
+  async viewerToken(id: string): Promise<string | null> {
+    const row = await this.fetchPasscode(id);
+    if (!row) return null;
+    return deriveViewerToken(row.hash, id);
+  }
+
+  async checkViewerToken(id: string, token: string): Promise<boolean> {
+    const expected = await this.viewerToken(id);
+    if (!expected) return false;
+    return constantTimeEqual(expected, token);
+  }
+
+  private async fetchPasscode(id: string): Promise<{ hash: string; salt: string } | null> {
+    const row = await this.db
+      .prepare("SELECT passcode_hash, passcode_salt FROM artifacts WHERE id = ?1")
+      .bind(id)
+      .first<{ passcode_hash: string | null; passcode_salt: string | null }>();
+    if (!row || row.passcode_hash === null || row.passcode_salt === null) return null;
+    return { hash: row.passcode_hash, salt: row.passcode_salt };
   }
 
   async addVersion(
