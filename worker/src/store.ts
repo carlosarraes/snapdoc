@@ -31,6 +31,9 @@ export interface Comment {
   author: string;
   body: string;
   createdAt: string;
+  parentId: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
 }
 
 export interface TokenRecord {
@@ -165,6 +168,59 @@ function rowToArtifact(row: ArtifactRow): Artifact {
   };
   if (row.token_name !== undefined) artifact.tokenName = row.token_name;
   return artifact;
+}
+
+interface CommentRow {
+  id: string;
+  artifact_id: string;
+  version: number;
+  author: string;
+  body: string;
+  created_at: string;
+  parent_id: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+}
+
+const COMMENT_COLUMNS = "id, artifact_id, version, author, body, created_at, parent_id, resolved_at, resolved_by";
+
+function rowToComment(r: CommentRow): Comment {
+  return {
+    id: r.id,
+    artifactId: r.artifact_id,
+    version: r.version,
+    author: r.author,
+    body: r.body,
+    createdAt: r.created_at,
+    parentId: r.parent_id,
+    resolvedAt: r.resolved_at,
+    resolvedBy: r.resolved_by,
+  };
+}
+
+// Groups a flat, time-ordered comment page into thread-contiguous order (each
+// root followed by its replies) and filters whole threads by the root's
+// resolution state — replies carry no status of their own, they follow the root.
+function orderThreads(comments: Comment[], status: "open" | "resolved" | "all"): Comment[] {
+  const repliesByRoot = new Map<string, Comment[]>();
+  for (const c of comments) {
+    if (c.parentId !== null) {
+      const arr = repliesByRoot.get(c.parentId);
+      if (arr) arr.push(c);
+      else repliesByRoot.set(c.parentId, [c]);
+    }
+  }
+  const out: Comment[] = [];
+  for (const root of comments) {
+    if (root.parentId !== null) continue;
+    const resolved = root.resolvedAt !== null;
+    if (status === "open" && resolved) continue;
+    if (status === "resolved" && !resolved) continue;
+    out.push(root);
+    const replies = repliesByRoot.get(root.id);
+    if (replies) out.push(...replies);
+  }
+  return out;
 }
 
 // Computes the externally visible status: an "active" row past its expiry is
@@ -454,54 +510,90 @@ export class Store {
 
   // ---- comments (doc-level threads; authored by team via Access, read by agents) ----
 
-  async addComment(artifactId: string, input: { author: string; body: string }): Promise<Comment> {
+  async addComment(
+    artifactId: string,
+    input: { author: string; body: string; parentId?: string | null },
+  ): Promise<Comment> {
     const current = await this.fetchArtifact(artifactId);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    let parentId: string | null = null;
+    if (input.parentId) {
+      const parent = await this.db
+        .prepare("SELECT id, artifact_id, parent_id FROM comments WHERE id = ?1 AND deleted_at IS NULL")
+        .bind(input.parentId)
+        .first<{ id: string; artifact_id: string; parent_id: string | null }>();
+      if (!parent || parent.artifact_id !== artifactId) {
+        throw new StoreError("invalid_request", "Parent comment not found on this artifact.");
+      }
+      // Re-root: a reply always hangs off the thread root, never another reply.
+      parentId = parent.parent_id ?? parent.id;
+    }
     const id = `cmt_${randomId(16)}`;
     const createdAt = isoNow();
     const version = current.currentVersion;
     await this.db
-      .prepare("INSERT INTO comments (id, artifact_id, version, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
-      .bind(id, artifactId, version, input.author, input.body, createdAt)
+      .prepare("INSERT INTO comments (id, artifact_id, version, author, body, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+      .bind(id, artifactId, version, input.author, input.body, createdAt, parentId)
       .run();
-    return { id, artifactId, version, author: input.author, body: input.body, createdAt };
+    return { id, artifactId, version, author: input.author, body: input.body, createdAt, parentId, resolvedAt: null, resolvedBy: null };
   }
 
-  async listComments(artifactId: string): Promise<{ comments: Comment[]; truncated: boolean }> {
+  async listComments(
+    artifactId: string,
+    status: "open" | "resolved" | "all" = "all",
+  ): Promise<{ comments: Comment[]; truncated: boolean }> {
     const { results } = await this.db
       .prepare(
-        `SELECT id, artifact_id, version, author, body, created_at FROM comments
+        `SELECT ${COMMENT_COLUMNS} FROM comments
          WHERE artifact_id = ?1 AND deleted_at IS NULL
          ORDER BY created_at ASC, rowid ASC LIMIT ?2`,
       )
       .bind(artifactId, COMMENTS_LIMIT + 1)
-      .all<{ id: string; artifact_id: string; version: number; author: string; body: string; created_at: string }>();
+      .all<CommentRow>();
     const truncated = results.length > COMMENTS_LIMIT;
-    const page = truncated ? results.slice(0, COMMENTS_LIMIT) : results;
-    return {
-      comments: page.map((r) => ({
-        id: r.id,
-        artifactId: r.artifact_id,
-        version: r.version,
-        author: r.author,
-        body: r.body,
-        createdAt: r.created_at,
-      })),
-      truncated,
-    };
+    const page = (truncated ? results.slice(0, COMMENTS_LIMIT) : results).map(rowToComment);
+    return { comments: orderThreads(page, status), truncated };
   }
 
   async deleteComment(commentId: string): Promise<{ id: string; deletedAt: string } | null> {
     const row = await this.db
-      .prepare("SELECT id, deleted_at FROM comments WHERE id = ?1")
+      .prepare("SELECT id, parent_id, deleted_at FROM comments WHERE id = ?1")
       .bind(commentId)
-      .first<{ id: string; deleted_at: string | null }>();
+      .first<{ id: string; parent_id: string | null; deleted_at: string | null }>();
     if (!row) return null;
     if (row.deleted_at) return { id: row.id, deletedAt: row.deleted_at };
     const deletedAt = isoNow();
-    await this.db.prepare("UPDATE comments SET deleted_at = ?1 WHERE id = ?2").bind(deletedAt, commentId).run();
+    if (row.parent_id === null) {
+      // Deleting a root cascades to the whole thread (root + its live replies).
+      await this.db
+        .prepare("UPDATE comments SET deleted_at = ?1 WHERE (id = ?2 OR parent_id = ?2) AND deleted_at IS NULL")
+        .bind(deletedAt, commentId)
+        .run();
+    } else {
+      await this.db.prepare("UPDATE comments SET deleted_at = ?1 WHERE id = ?2").bind(deletedAt, commentId).run();
+    }
     return { id: commentId, deletedAt };
+  }
+
+  async setCommentResolved(commentId: string, resolved: boolean, resolvedBy: string): Promise<Comment | null> {
+    const row = await this.db
+      .prepare("SELECT id, parent_id FROM comments WHERE id = ?1 AND deleted_at IS NULL")
+      .bind(commentId)
+      .first<{ id: string; parent_id: string | null }>();
+    if (!row) return null;
+    // Re-root: resolution is a thread property, recorded on the root.
+    const rootId = row.parent_id ?? row.id;
+    if (resolved) {
+      // Idempotent: keep the first resolver + timestamp if already resolved.
+      await this.db
+        .prepare("UPDATE comments SET resolved_at = ?1, resolved_by = ?2 WHERE id = ?3 AND resolved_at IS NULL")
+        .bind(isoNow(), resolvedBy, rootId)
+        .run();
+    } else {
+      await this.db.prepare("UPDATE comments SET resolved_at = NULL, resolved_by = NULL WHERE id = ?1").bind(rootId).run();
+    }
+    return this.fetchComment(rootId);
   }
 
   // ---- rate limiting (sliding one-hour window over publish events) ----
@@ -566,6 +658,14 @@ export class Store {
       .bind(isoNow(), id)
       .first<ArtifactRow>();
     return row ? rowToArtifact(row) : null;
+  }
+
+  private async fetchComment(id: string): Promise<Comment | null> {
+    const row = await this.db
+      .prepare(`SELECT ${COMMENT_COLUMNS} FROM comments WHERE id = ?1`)
+      .bind(id)
+      .first<CommentRow>();
+    return row ? rowToComment(row) : null;
   }
 
   private async purgeBlobs(id: string): Promise<void> {

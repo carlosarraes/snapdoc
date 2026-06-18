@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS comments (
   author TEXT NOT NULL,
   body TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  deleted_at TEXT
+  deleted_at TEXT,
+  parent_id TEXT REFERENCES comments(id),
+  resolved_at TEXT,
+  resolved_by TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_artifact ON comments(artifact_id, created_at);

@@ -6,7 +6,7 @@
 // additionally accepts the ADMIN_BOOTSTRAP bearer secret so the first token
 // can be minted headlessly.
 import { Hono } from "hono";
-import { mapStoreError, parseListParams } from "./api";
+import { mapStoreError, parseCommentStatus, parseListParams } from "./api";
 import { artifactJson, commentJson, errorResponse, versionJson } from "./http";
 import { Store } from "./store";
 import type { Env } from "./types";
@@ -217,21 +217,26 @@ export function createAdminApp(): Hono<AdminCtx> {
   // ---- comments (humans author via Access; agents read via token in api.ts) ----
 
   app.post("/artifacts/:id/comments", async (c) => {
-    let body: unknown;
+    let payload: { body?: unknown; parent_id?: unknown };
     try {
-      ({ body } = (await c.req.json()) as { body?: unknown });
+      payload = (await c.req.json()) as { body?: unknown; parent_id?: unknown };
     } catch {
       return errorResponse("invalid_request", "Body must be JSON: { \"body\": \"...\" }.");
     }
+    const { body, parent_id: parentId } = payload;
     if (typeof body !== "string" || body.trim().length === 0) {
       return errorResponse("invalid_request", "Comment body is required.");
     }
     if (new TextEncoder().encode(body).byteLength > MAX_COMMENT_BYTES) {
       return errorResponse("invalid_request", "Comment exceeds the 8 KB limit.");
     }
+    if (parentId !== undefined && typeof parentId !== "string") {
+      return errorResponse("invalid_request", "parent_id must be a string.");
+    }
     const comment = await c.get("store").addComment(c.req.param("id"), {
       author: c.get("accessEmail") ?? "unknown",
       body,
+      parentId,
     });
     return c.json(commentJson(comment), 201);
   });
@@ -239,12 +244,29 @@ export function createAdminApp(): Hono<AdminCtx> {
   app.get("/artifacts/:id/comments", async (c) => {
     const id = c.req.param("id");
     if (!(await c.get("store").getArtifactGate(id))) return errorResponse("not_found", "Artifact not found.");
-    const { comments, truncated } = await c.get("store").listComments(id);
+    const status = parseCommentStatus(c.req.query("status"));
+    if (status instanceof Response) return status;
+    const { comments, truncated } = await c.get("store").listComments(id, status);
     return c.json({
       artifact_id: id,
       comments: comments.map(commentJson),
       ...(truncated ? { truncated: true } : {}),
     });
+  });
+
+  app.patch("/comments/:cid", async (c) => {
+    let resolved: unknown;
+    try {
+      ({ resolved } = (await c.req.json()) as { resolved?: unknown });
+    } catch {
+      return errorResponse("invalid_request", "Body must be JSON: { \"resolved\": true|false }.");
+    }
+    if (typeof resolved !== "boolean") {
+      return errorResponse("invalid_request", "resolved must be a boolean.");
+    }
+    const updated = await c.get("store").setCommentResolved(c.req.param("cid"), resolved, c.get("accessEmail") ?? "unknown");
+    if (!updated) return errorResponse("not_found", "Comment not found.");
+    return c.json(commentJson(updated));
   });
 
   app.delete("/comments/:cid", async (c) => {

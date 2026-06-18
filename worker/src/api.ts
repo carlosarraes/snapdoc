@@ -206,7 +206,9 @@ export function createPublisherApp(): Hono<ApiContext> {
     const store = c.get("store");
     const id = c.req.param("id");
     if (!(await store.getArtifactGate(id))) return errorResponse("not_found", "Artifact not found.");
-    const { comments, truncated } = await store.listComments(id);
+    const status = parseCommentStatus(c.req.query("status"));
+    if (status instanceof Response) return status;
+    const { comments, truncated } = await store.listComments(id, status);
     return c.json({
       artifact_id: id,
       comments: comments.map(commentJson),
@@ -249,4 +251,17 @@ export function parseListParams(
     }
   }
   return { status: parsedStatus, limit: parsedLimit, cursor };
+}
+
+export type CommentStatusFilter = "open" | "resolved" | "all";
+const COMMENT_STATUSES: CommentStatusFilter[] = ["open", "resolved", "all"];
+
+// Parses the comment read filter; defaults to "all" so the no-param contract is
+// unchanged (open + resolved). Filtering is thread-level, applied on the root.
+export function parseCommentStatus(status: string | undefined): CommentStatusFilter | Response {
+  if (status === undefined) return "all";
+  if (!COMMENT_STATUSES.includes(status as CommentStatusFilter)) {
+    return errorResponse("invalid_request", "status must be one of open, resolved, all.");
+  }
+  return status as CommentStatusFilter;
 }

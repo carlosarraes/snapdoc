@@ -62,6 +62,10 @@ export function commentJson(comment: Comment) {
     version: comment.version,
     body: comment.body,
     created_at: comment.createdAt,
+    parent_id: comment.parentId,
+    resolved: comment.resolvedAt !== null,
+    resolved_at: comment.resolvedAt,
+    resolved_by: comment.resolvedBy,
   };
 }
 

@@ -325,3 +325,136 @@ describe("comments", () => {
     await expect(store.addComment(art.id, { author: "a@t.com", body: "x" })).rejects.toThrow(StoreError);
   });
 });
+
+describe("comment threads and resolution", () => {
+  it("a reply attaches to its root and captures the current version; reply-to-a-reply re-roots", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const root = await store.addComment(art.id, { author: "a@t.com", body: "root" }); // v1
+    await store.addVersion(art.id, { defaultTtlSeconds: 14 * DAY, contentType: "text/html", body: HTML });
+    const reply = await store.addComment(art.id, { author: "b@t.com", body: "reply", parentId: root.id });
+    expect(reply.parentId).toBe(root.id);
+    expect(reply.version).toBe(2); // version-at-reply-time
+
+    const reply2 = await store.addComment(art.id, { author: "c@t.com", body: "reply2", parentId: reply.id });
+    expect(reply2.parentId).toBe(root.id); // re-rooted onto the thread
+  });
+
+  it("rejects a reply whose parent is missing, soft-deleted, or on another artifact", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const other = await makeArtifact(store, tok.id);
+    const elsewhere = await store.addComment(other.id, { author: "a@t.com", body: "root" });
+    const gone = await store.addComment(art.id, { author: "a@t.com", body: "doomed" });
+    await store.deleteComment(gone.id);
+
+    await expect(store.addComment(art.id, { author: "b@t.com", body: "x", parentId: "cmt_nope" })).rejects.toThrow(StoreError);
+    await expect(store.addComment(art.id, { author: "b@t.com", body: "x", parentId: gone.id })).rejects.toThrow(StoreError);
+    await expect(store.addComment(art.id, { author: "b@t.com", body: "x", parentId: elsewhere.id })).rejects.toThrow(StoreError);
+  });
+
+  it("resolves a thread (idempotent), records the resolver, and unresolves", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const root = await store.addComment(art.id, { author: "a@t.com", body: "root" });
+
+    const resolved = await store.setCommentResolved(root.id, true, "lead@team.com");
+    expect(resolved?.resolvedAt).toBeTruthy();
+    expect(resolved?.resolvedBy).toBe("lead@team.com");
+
+    const again = await store.setCommentResolved(root.id, true, "other@team.com");
+    expect(again?.resolvedAt).toBe(resolved?.resolvedAt); // idempotent: keeps first stamp
+    expect(again?.resolvedBy).toBe("lead@team.com");
+
+    const reopened = await store.setCommentResolved(root.id, false, "lead@team.com");
+    expect(reopened?.resolvedAt).toBeNull();
+    expect(reopened?.resolvedBy).toBeNull();
+  });
+
+  it("resolving a reply id resolves its root thread", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const root = await store.addComment(art.id, { author: "a@t.com", body: "root" });
+    const reply = await store.addComment(art.id, { author: "b@t.com", body: "reply", parentId: root.id });
+
+    const resolved = await store.setCommentResolved(reply.id, true, "lead@team.com");
+    expect(resolved?.id).toBe(root.id);
+    expect(resolved?.resolvedAt).toBeTruthy();
+  });
+
+  it("a reply to a resolved thread leaves it resolved", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const root = await store.addComment(art.id, { author: "a@t.com", body: "root" });
+    await store.setCommentResolved(root.id, true, "lead@team.com");
+    await store.addComment(art.id, { author: "b@t.com", body: "still broken?", parentId: root.id });
+
+    const list = await store.listComments(art.id);
+    expect(list.comments.find((c) => c.id === root.id)?.resolvedAt).toBeTruthy();
+  });
+
+  it("setCommentResolved returns null for unknown or soft-deleted comments", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    expect(await store.setCommentResolved("cmt_nope", true, "x@t.com")).toBeNull();
+    const c = await store.addComment(art.id, { author: "a@t.com", body: "x" });
+    await store.deleteComment(c.id);
+    expect(await store.setCommentResolved(c.id, true, "x@t.com")).toBeNull();
+  });
+
+  it("lists threads contiguously: each root is followed by its replies", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const r1 = await store.addComment(art.id, { author: "a@t.com", body: "root1" });
+    await store.addComment(art.id, { author: "a@t.com", body: "root2" });
+    // reply created after root2, but it belongs under root1
+    await store.addComment(art.id, { author: "b@t.com", body: "root1-reply", parentId: r1.id });
+
+    const list = await store.listComments(art.id);
+    expect(list.comments.map((c) => c.body)).toEqual(["root1", "root1-reply", "root2"]);
+  });
+
+  it("filters by thread status (open keeps unresolved roots + their replies)", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const open = await store.addComment(art.id, { author: "a@t.com", body: "open-root" });
+    await store.addComment(art.id, { author: "b@t.com", body: "open-reply", parentId: open.id });
+    const done = await store.addComment(art.id, { author: "a@t.com", body: "done-root" });
+    await store.addComment(art.id, { author: "b@t.com", body: "done-reply", parentId: done.id });
+    await store.setCommentResolved(done.id, true, "lead@team.com");
+
+    const openOnly = await store.listComments(art.id, "open");
+    expect(openOnly.comments.map((c) => c.body)).toEqual(["open-root", "open-reply"]);
+
+    const resolvedOnly = await store.listComments(art.id, "resolved");
+    expect(resolvedOnly.comments.map((c) => c.body)).toEqual(["done-root", "done-reply"]);
+
+    const all = await store.listComments(art.id, "all");
+    expect(all.comments).toHaveLength(4);
+  });
+
+  it("deleting a root cascades to its replies; deleting a reply leaves the rest", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const root = await store.addComment(art.id, { author: "a@t.com", body: "root" });
+    const reply1 = await store.addComment(art.id, { author: "b@t.com", body: "reply1", parentId: root.id });
+    await store.addComment(art.id, { author: "c@t.com", body: "reply2", parentId: root.id });
+
+    await store.deleteComment(reply1.id);
+    let list = await store.listComments(art.id);
+    expect(list.comments.map((c) => c.body)).toEqual(["root", "reply2"]);
+
+    await store.deleteComment(root.id);
+    list = await store.listComments(art.id);
+    expect(list.comments).toHaveLength(0);
+  });
+});
