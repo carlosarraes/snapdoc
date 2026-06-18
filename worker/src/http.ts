@@ -1,5 +1,5 @@
 // Shared HTTP helpers: error envelope, artifact JSON shape, duration parsing.
-import type { Artifact, ArtifactVersion, Comment, StoreErrorCode } from "./store";
+import type { Artifact, ArtifactVersion, Comment, StoreErrorCode, TokenRecord } from "./store";
 import type { Env } from "./types";
 
 export type ErrorCode =
@@ -62,6 +62,17 @@ export function commentJson(comment: Comment) {
     version: comment.version,
     body: comment.body,
     created_at: comment.createdAt,
+  };
+}
+
+// Identity subset of a token for /v1/whoami. Deliberately omits last_used_at
+// (auth just refreshed it to now, so it would always echo "now") and revoked_at
+// (a revoked token never reaches an authenticated handler).
+export function tokenJson(token: TokenRecord) {
+  return {
+    id: token.id,
+    name: token.name,
+    created_at: token.createdAt,
   };
 }
 

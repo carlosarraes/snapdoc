@@ -4,7 +4,7 @@ import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
-import { artifactJson, commentJson, errorResponse, parseDuration, versionJson } from "./http";
+import { artifactJson, commentJson, errorResponse, parseDuration, tokenJson, versionJson } from "./http";
 import type { Env } from "./types";
 
 interface ApiVariables {
@@ -115,6 +115,7 @@ export function createPublisherApp(): Hono<ApiContext> {
   };
   app.use("/artifacts", authMiddleware);
   app.use("/artifacts/*", authMiddleware);
+  app.use("/whoami", authMiddleware);
 
   app.onError((err) => mapStoreError(err));
 
@@ -127,6 +128,10 @@ export function createPublisherApp(): Hono<ApiContext> {
     }
     return mintTokenResponse(c.req.raw, new Store(c.env.DB, c.env.BLOBS));
   });
+
+  // Identity check: a 200 here proves the bearer token is valid (authMiddleware
+  // already authenticated it) and reports which token is calling.
+  app.get("/whoami", (c) => c.json({ token: tokenJson(c.get("token")) }));
 
   app.post("/artifacts", async (c) => {
     const store = c.get("store");
