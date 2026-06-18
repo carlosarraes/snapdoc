@@ -97,6 +97,17 @@ type CommentsResult struct {
 	Truncated  bool      `json:"truncated"`
 }
 
+// Identity is the calling token's own metadata, returned by GET /v1/whoami.
+type Identity struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
+type WhoamiResult struct {
+	Token Identity `json:"token"`
+}
+
 type TokenSecret struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -163,6 +174,17 @@ func (c *Client) List(opts ListOptions) (*ListResult, error) {
 func (c *Client) Get(id string) (*GetResult, error) {
 	var res GetResult
 	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id), nil, nil, "", &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// Whoami verifies the configured token and returns its identity. A successful
+// call proves the token is valid; an invalid or revoked token surfaces as an
+// *Error with code "unauthorized".
+func (c *Client) Whoami() (*WhoamiResult, error) {
+	var res WhoamiResult
+	if err := c.do("GET", "/v1/whoami", nil, nil, "", &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

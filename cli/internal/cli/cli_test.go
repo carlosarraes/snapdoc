@@ -616,6 +616,68 @@ func TestTokenRevoke(t *testing.T) {
 	}
 }
 
+// --- whoami ---
+
+func TestWhoamiJSONOutput(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"token":{"id":"tok_abc","name":"ci-laptop","created_at":"2026-06-12T15:04:05Z"}}`)
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"whoami", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	req := srv.reqs[0]
+	if req.method != "GET" || req.path != "/v1/whoami" {
+		t.Errorf("request = %s %s, want GET /v1/whoami", req.method, req.path)
+	}
+	if req.auth != "Bearer tok-1" {
+		t.Errorf("auth = %q, want Bearer tok-1", req.auth)
+	}
+	var m struct {
+		Token map[string]any `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	if m.Token["id"] != "tok_abc" || m.Token["name"] != "ci-laptop" || m.Token["created_at"] != "2026-06-12T15:04:05Z" {
+		t.Errorf("token = %v", m.Token)
+	}
+}
+
+func TestWhoamiUnauthorizedSurfaces(t *testing.T) {
+	dir := setupEnv(t)
+	srv := errServer(t, 401, "unauthorized", "A valid API token is required.", nil)
+	writeConfig(t, dir, srv.URL, "sd_live_bad")
+
+	stdout, stderr, code := runCLI([]string{"whoami"}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit for an invalid token")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "unauthorized") {
+		t.Errorf("stderr %q should report the unauthorized code", stderr)
+	}
+}
+
+func TestWhoamiHumanOutput(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"token":{"id":"tok_abc","name":"ci-laptop","created_at":"2026-06-12T15:04:05Z"}}`)
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"whoami"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"ci-laptop", "tok_abc", "2026-06-12T15:04:05Z"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout %q missing %q", stdout, want)
+		}
+	}
+}
+
 // --- login ---
 
 func TestLoginWithFlags(t *testing.T) {
