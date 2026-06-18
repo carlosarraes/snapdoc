@@ -28,6 +28,10 @@ export interface Comment {
   version: number;
   body: string;
   created_at: string;
+  parent_id: string | null;
+  resolved: boolean;
+  resolved_at: string | null;
+  resolved_by: string | null;
 }
 
 export interface TokenInfo {
@@ -97,13 +101,19 @@ export const api = {
   deleteArtifact: (id: string) =>
     req<{ id: string; status: string }>("DELETE", `/v1/admin/artifacts/${id}`),
 
-  listComments: (id: string) =>
+  listComments: (id: string, status?: string) =>
     req<{ artifact_id: string; comments: Comment[]; truncated?: boolean }>(
       "GET",
-      `/v1/admin/artifacts/${id}/comments`,
+      `/v1/admin/artifacts/${id}/comments${status ? `?status=${status}` : ""}`,
     ),
-  addComment: (id: string, body: string) =>
-    req<Comment>("POST", `/v1/admin/artifacts/${id}/comments`, { body }),
+  addComment: (id: string, body: string, parentId?: string) =>
+    req<Comment>(
+      "POST",
+      `/v1/admin/artifacts/${id}/comments`,
+      parentId ? { body, parent_id: parentId } : { body },
+    ),
+  resolveComment: (cid: string, resolved: boolean) =>
+    req<Comment>("PATCH", `/v1/admin/comments/${cid}`, { resolved }),
   deleteComment: (cid: string) =>
     req<{ id: string; deleted_at: string }>("DELETE", `/v1/admin/comments/${cid}`),
 

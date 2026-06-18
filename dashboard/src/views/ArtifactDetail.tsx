@@ -1,25 +1,47 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, formatBytes, formatDate, type Comment } from "../api";
-import { Banner, CopyButton, useAsync } from "../components";
+import { Banner, CopyButton, RelativeTime, useAsync } from "../components";
+
+type StatusFilter = "all" | "open" | "resolved";
 
 export function ArtifactDetail() {
   const { id = "" } = useParams();
   const meta = useAsync(() => api.getArtifact(id), [id]);
-  const thread = useAsync(() => api.listComments(id), [id]);
+
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const thread = useAsync(() => api.listComments(id, status === "all" ? undefined : status), [id, status]);
+
+  // Local copy of the thread so mutations patch in place (no full reload/flicker).
+  // Re-synced whenever a fetch lands (filter change or manual refresh).
+  const [comments, setComments] = useState<Comment[]>([]);
+  useEffect(() => {
+    if (thread.data) setComments(thread.data.comments);
+  }, [thread.data]);
 
   const [draft, setDraft] = useState("");
   const [posting, setPosting] = useState(false);
+  const [replyTo, setReplyTo] = useState<string | null>(null);
+  const [replyDraft, setReplyDraft] = useState("");
   const [actionError, setActionError] = useState("");
 
-  async function post() {
+  function upsert(c: Comment) {
+    setComments((prev) => {
+      const i = prev.findIndex((x) => x.id === c.id);
+      if (i === -1) return [...prev, c];
+      const next = prev.slice();
+      next[i] = c;
+      return next;
+    });
+  }
+
+  async function postRoot() {
     if (!draft.trim()) return;
     setPosting(true);
     setActionError("");
     try {
-      await api.addComment(id, draft.trim());
+      upsert(await api.addComment(id, draft.trim()));
       setDraft("");
-      thread.reload();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -27,11 +49,34 @@ export function ArtifactDetail() {
     }
   }
 
+  async function postReply(rootId: string) {
+    if (!replyDraft.trim()) return;
+    setActionError("");
+    try {
+      upsert(await api.addComment(id, replyDraft.trim(), rootId));
+      setReplyDraft("");
+      setReplyTo(null);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function toggleResolved(c: Comment) {
+    setActionError("");
+    try {
+      upsert(await api.resolveComment(c.id, !c.resolved));
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function removeComment(c: Comment) {
-    if (!confirm("Delete this comment?")) return;
+    if (!confirm(c.parent_id ? "Delete this reply?" : "Delete this thread (and its replies)?")) return;
+    setActionError("");
     try {
       await api.deleteComment(c.id);
-      thread.reload();
+      // Drop the comment plus, for a root, its replies (server cascades these).
+      setComments((prev) => prev.filter((x) => x.id !== c.id && x.parent_id !== c.id));
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     }
@@ -58,6 +103,16 @@ export function ArtifactDetail() {
   }
 
   const a = meta.data?.artifact;
+
+  const roots = comments.filter((c) => c.parent_id === null);
+  const repliesByRoot = new Map<string, Comment[]>();
+  for (const c of comments) {
+    if (c.parent_id) {
+      const arr = repliesByRoot.get(c.parent_id);
+      if (arr) arr.push(c);
+      else repliesByRoot.set(c.parent_id, [c]);
+    }
+  }
 
   return (
     <>
@@ -147,34 +202,104 @@ export function ArtifactDetail() {
       )}
 
       <div className="section-label">comments</div>
+      <div className="row filter-row">
+        {(["all", "open", "resolved"] as const).map((s) => (
+          <button key={s} className={`chip ${status === s ? "active" : ""}`} onClick={() => setStatus(s)}>
+            {s}
+          </button>
+        ))}
+        <div className="spacer" />
+        <button className="btn btn-sm" onClick={() => thread.reload()} disabled={thread.loading}>
+          {thread.loading ? "…" : "refresh"}
+        </button>
+      </div>
       {thread.error && <Banner msg={thread.error} />}
-      {(thread.data?.comments ?? []).map((c) => (
-        <div className="comment" key={c.id}>
-          <div className="head">
-            <span className="author">{c.author}</span>
-            <span>· v{c.version}</span>
-            <span>· {formatDate(c.created_at)}</span>
-            <div className="spacer" />
-            <button className="btn btn-sm btn-danger" onClick={() => removeComment(c)}>
-              delete
-            </button>
+
+      {roots.map((c) => {
+        const replies = repliesByRoot.get(c.id) ?? [];
+        return (
+          <div className={`comment${c.resolved ? " resolved" : ""}`} key={c.id}>
+            <div className="head">
+              <span className="author">{c.author}</span>
+              <span>· v{c.version}</span>
+              <span>
+                · <RelativeTime iso={c.created_at} />
+              </span>
+              {c.resolved && (
+                <>
+                  <span className="badge resolved">resolved</span>
+                  {c.resolved_by && <span className="muted">by {c.resolved_by}</span>}
+                </>
+              )}
+              <div className="spacer" />
+              <button className="btn btn-sm" onClick={() => setReplyTo(replyTo === c.id ? null : c.id)}>
+                reply
+              </button>
+              <button className="btn btn-sm" onClick={() => toggleResolved(c)}>
+                {c.resolved ? "reopen" : "resolve"}
+              </button>
+              <button className="btn btn-sm btn-danger" onClick={() => removeComment(c)}>
+                delete
+              </button>
+            </div>
+            <div className="body">{c.body}</div>
+
+            {replies.map((r) => (
+              <div className="comment reply" key={r.id}>
+                <div className="head">
+                  <span className="author">{r.author}</span>
+                  <span>· v{r.version}</span>
+                  <span>
+                    · <RelativeTime iso={r.created_at} />
+                  </span>
+                  <div className="spacer" />
+                  <button className="btn btn-sm btn-danger" onClick={() => removeComment(r)}>
+                    delete
+                  </button>
+                </div>
+                <div className="body">{r.body}</div>
+              </div>
+            ))}
+
+            {replyTo === c.id && (
+              <div className="reply-box">
+                <textarea
+                  placeholder="Reply…"
+                  value={replyDraft}
+                  onChange={(e) => setReplyDraft(e.target.value)}
+                />
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => postReply(c.id)}
+                    disabled={!replyDraft.trim()}
+                  >
+                    reply
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setReplyTo(null);
+                      setReplyDraft("");
+                    }}
+                  >
+                    cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-          <div className="body">{c.body}</div>
-        </div>
-      ))}
-      {!thread.loading && (thread.data?.comments.length ?? 0) === 0 && (
+        );
+      })}
+      {!thread.loading && roots.length === 0 && (
         <p className="muted" style={{ marginBottom: 14 }}>
           No comments yet.
         </p>
       )}
 
-      <textarea
-        placeholder="Leave feedback…"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-      />
+      <textarea placeholder="Leave feedback…" value={draft} onChange={(e) => setDraft(e.target.value)} />
       <div className="row" style={{ marginTop: 8 }}>
-        <button className="btn btn-primary" onClick={post} disabled={posting || !draft.trim()}>
+        <button className="btn btn-primary" onClick={postRoot} disabled={posting || !draft.trim()}>
           {posting ? "posting…" : "post comment"}
         </button>
       </div>

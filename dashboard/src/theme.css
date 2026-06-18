@@ -231,6 +231,29 @@ td .id { color: var(--dim); font-size: 12px; }
 .comment .head { color: var(--dim); font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; }
 .comment .author { color: var(--accent); }
 .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A resolved thread recedes but stays readable. */
+.comment.resolved { opacity: 0.6; }
+.badge.resolved { color: var(--dim); border-color: var(--border); background: transparent; }
+/* One-level replies sit indented inside their root, with a muted accent. */
+.comment .comment.reply { margin: 10px 0 0 20px; border-left-color: var(--dim); background: var(--bg); }
+.reply-box { margin: 10px 0 0 20px; }
+.reply-box textarea { min-height: 54px; }
+
+/* Open / resolved / all filter chips above the thread. */
+.filter-row { margin-bottom: 12px; }
+.chip {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  text-transform: lowercase;
+}
+.chip:hover { border-color: var(--border-bright); color: var(--text); }
+.chip.active { color: var(--accent); border-color: rgba(63, 185, 80, 0.4); background: var(--accent-glow); }
 
 /* ---- token secret ---- */
 .secret {
