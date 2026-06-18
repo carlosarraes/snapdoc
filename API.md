@@ -77,6 +77,20 @@ is passcode-protected. `token_name` appears only in admin responses.
 
 ## Publisher endpoints (Bearer token)
 
+### GET /v1/whoami — identity / token check
+
+- Verifies the bearer token and reports which token is calling — the quickest way
+  to confirm a freshly minted token works. Read-only, no side effects.
+- 200 →
+
+```json
+{ "token": { "id": "tok_…", "name": "ci-laptop", "created_at": "..." } }
+```
+
+- 401 `unauthorized` if the token is missing, invalid, or revoked.
+- Omits `last_used_at` (authentication just refreshed it) and `revoked_at` (a
+  revoked token never authenticates).
+
 ### POST /v1/artifacts — publish new artifact
 
 - Body: raw artifact content.

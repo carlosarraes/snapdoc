@@ -51,6 +51,7 @@ cat plan.md | snapdoc publish - --markdown --quiet
 | `token create <name>` | Mint an API token (admin). `--bootstrap` uses `SNAPDOC_BOOTSTRAP` |
 | `token list` / `token revoke <id>` | Manage tokens (admin) |
 | `login` | Save API URL and token to the config file |
+| `whoami` | Show which token you're authenticated as (verifies the token works) |
 
 `--json` (global) prints raw JSON instead of human text — handy for scripts and agents.
 `--passcode` protects a new artifact; viewers get a browser unlock page. Markdown
