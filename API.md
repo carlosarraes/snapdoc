@@ -146,22 +146,36 @@ the stored artifact title when no `?title=` is given.
 
 ### GET /v1/artifacts/{id}/comments — read comments (the agent loop)
 
-- Token-gated (any valid team token). Returns all non-deleted comments, oldest-first.
+- Token-gated (any valid team token). Returns non-deleted comments in
+  **thread order**: each root is followed by its replies, oldest-first.
+- Optional `?status=open|resolved|all` (default `all`). The filter is
+  thread-level — `open` returns unresolved roots **and their replies**,
+  `resolved` returns resolved roots and their replies. An agent wanting just the
+  actionable feedback reads `?status=open`. A bad value is `invalid_request`.
 - 200 →
 
 ```json
 {
   "artifact_id": "x7Kp9qWm2AbCdE",
   "comments": [
-    { "id": "cmt_…", "author": "jane@team.com", "version": 2,
-      "body": "Tighten the intro.", "created_at": "2026-06-17T15:04:05Z" }
+    { "id": "cmt_root", "author": "jane@team.com", "version": 2,
+      "body": "Tighten the intro.", "created_at": "2026-06-17T15:04:05Z",
+      "parent_id": null, "resolved": true,
+      "resolved_at": "2026-06-17T16:10:00Z", "resolved_by": "lead@team.com" },
+    { "id": "cmt_reply", "author": "lead@team.com", "version": 3,
+      "body": "Done in v3.", "created_at": "2026-06-17T16:09:00Z",
+      "parent_id": "cmt_root", "resolved": false,
+      "resolved_at": null, "resolved_by": null }
   ]
 }
 ```
 
-- `version` is the artifact's `current_version` when the comment was posted. A
-  `"truncated": true` flag appears if the (500) cap is hit. 404 `not_found` if the
-  artifact does not exist.
+- `version` is the artifact's `current_version` when each comment was posted
+  (a reply captures its own). `parent_id` is `null` for a root, else the root it
+  hangs off (threads are one level — replies always attach to a root).
+  `resolved`/`resolved_at`/`resolved_by` are thread state carried on the root;
+  replies are always `resolved: false`. A `"truncated": true` flag appears if the
+  (500) cap is hit. 404 `not_found` if the artifact does not exist.
 
 ### POST /v1/artifacts/{id}/expire — expire now
 
@@ -194,15 +208,23 @@ scoped to a creator and includes `token_name`). Additionally:
 
 ### Comments (write + moderate)
 
-Humans author comments through Cloudflare Access (the future dashboard); agents
-read them via the token endpoint above. `author` comes from the Access JWT `email`
-claim — never a client field.
+Humans author comments through Cloudflare Access (the dashboard); agents read
+them via the token endpoint above. All writes (comment, reply, resolve, delete)
+are Access-only — agents never write. `author`/`resolved_by` come from the Access
+JWT `email` claim — never a client field.
 
-- `POST /v1/admin/artifacts/{id}/comments` — body `{ "body": "…" }` (≤8 KB else
-  `invalid_request`). 201 → Comment object. 404 `not_found` / 409 `not_active`
-  (deleted artifact).
-- `GET /v1/admin/artifacts/{id}/comments` — same shape as the token read, for the dashboard.
-- `DELETE /v1/admin/comments/{cid}` — soft-delete (idempotent). 200 → `{ "id", "deleted_at" }`.
+- `POST /v1/admin/artifacts/{id}/comments` — body `{ "body": "…", "parent_id"?: "cmt_…" }`
+  (body ≤8 KB else `invalid_request`). Omit `parent_id` for a root; include it to
+  reply. A reply re-roots onto the thread, so replying to a reply still attaches
+  to the root. `parent_id` on another artifact (or missing) → `invalid_request`.
+  201 → Comment object. 404 `not_found` / 409 `not_active` (deleted artifact).
+- `GET /v1/admin/artifacts/{id}/comments` — same shape + `?status=` as the token read, for the dashboard.
+- `PATCH /v1/admin/comments/{cid}` — body `{ "resolved": true|false }`. Resolution
+  is a thread property, so this acts on the root (passing a reply id re-roots).
+  Idempotent. 200 → the updated Comment object. 404 `not_found`.
+- `DELETE /v1/admin/comments/{cid}` — soft-delete (idempotent). Deleting a root
+  **cascades** to its replies; deleting a reply removes only that reply.
+  200 → `{ "id", "deleted_at" }`.
 
 ### Bootstrap
 
