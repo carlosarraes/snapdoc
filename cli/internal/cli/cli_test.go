@@ -970,3 +970,38 @@ func TestCommentsEmpty(t *testing.T) {
 		t.Errorf("expected empty message:\n%s", stdout)
 	}
 }
+
+func TestCommentsRendersThreadsAndResolved(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact_id":"x","comments":[` +
+		`{"id":"cmt_root","author":"jane@team.com","version":2,"body":"tighten intro","created_at":"t1","parent_id":null,"resolved":true,"resolved_at":"t2","resolved_by":"lead@team.com"},` +
+		`{"id":"cmt_reply","author":"bob@team.com","version":3,"body":"done in v3","created_at":"t3","parent_id":"cmt_root","resolved":false,"resolved_at":null,"resolved_by":null}` +
+		`]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"comments", "x"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "resolved") || !strings.Contains(stdout, "lead@team.com") {
+		t.Errorf("missing resolved marker:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "↳") || !strings.Contains(stdout, "bob@team.com") || !strings.Contains(stdout, "done in v3") {
+		t.Errorf("missing indented reply:\n%s", stdout)
+	}
+}
+
+func TestCommentsStatusFlag(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"artifact_id":"x","comments":[]}`)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	_, _, code := runCLI([]string{"comments", "x", "--status", "open"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].query["status"] != "open" {
+		t.Errorf("status query = %q, want open", srv.reqs[0].query["status"])
+	}
+}

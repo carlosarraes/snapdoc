@@ -84,11 +84,15 @@ type DeleteResult struct {
 }
 
 type Comment struct {
-	ID        string `json:"id"`
-	Author    string `json:"author"`
-	Version   int    `json:"version"`
-	Body      string `json:"body"`
-	CreatedAt string `json:"created_at"`
+	ID         string  `json:"id"`
+	Author     string  `json:"author"`
+	Version    int     `json:"version"`
+	Body       string  `json:"body"`
+	CreatedAt  string  `json:"created_at"`
+	ParentID   *string `json:"parent_id"`
+	Resolved   bool    `json:"resolved"`
+	ResolvedAt *string `json:"resolved_at"`
+	ResolvedBy *string `json:"resolved_by"`
 }
 
 type CommentsResult struct {
@@ -190,9 +194,13 @@ func (c *Client) Whoami() (*WhoamiResult, error) {
 	return &res, nil
 }
 
-func (c *Client) ListComments(id string) (*CommentsResult, error) {
+func (c *Client) ListComments(id, status string) (*CommentsResult, error) {
+	q := url.Values{}
+	if status != "" {
+		q.Set("status", status)
+	}
 	var res CommentsResult
-	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id)+"/comments", nil, nil, "", &res); err != nil {
+	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id)+"/comments", q, nil, "", &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
