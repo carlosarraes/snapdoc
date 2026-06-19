@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
+import { htmlToMarkdown } from "./html-to-markdown";
 import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
 import { artifactJson, commentJson, errorResponse, parseDuration, tokenJson, versionJson } from "./http";
 import type { Env } from "./types";
@@ -216,6 +217,65 @@ export function createPublisherApp(): Hono<ApiContext> {
     });
   });
 
+  // Content read for agents: Markdown by default (far fewer tokens than HTML),
+  // raw HTML with ?format=html. A valid token is necessary but NOT sufficient —
+  // passcode-protected artifacts still require the X-Snapdoc-Passcode header.
+  app.get("/artifacts/:id/content", async (c) => {
+    const store = c.get("store");
+    const id = c.req.param("id");
+
+    const format = parseContentFormat(c.req.query("format"));
+    if (format instanceof Response) return format;
+    const version = parseContentVersion(c.req.query("version"));
+    if (version instanceof Response) return version;
+
+    const gate = await store.getArtifactGate(id);
+    if (!gate) return errorResponse("not_found", "Artifact not found.");
+    if (gate.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
+
+    if (gate.hasPasscode) {
+      const passcode = c.req.header("X-Snapdoc-Passcode");
+      if (!passcode) {
+        return errorResponse("passcode_required", "This artifact is passcode-protected; supply X-Snapdoc-Passcode.");
+      }
+      if (!(await store.verifyPasscode(id, passcode))) {
+        return errorResponse("passcode_incorrect", "The passcode is incorrect.");
+      }
+    }
+
+    const content = await store.getServableContent(id, version);
+    if (!content) return errorResponse("not_found", "Artifact not found.");
+    if (content.state !== "active") return errorResponse("gone", "Artifact is no longer available.");
+
+    let outFormat: "md" | "html" = format;
+    let outContent = content.html;
+    let outContentType = content.contentType;
+    if (format === "md") {
+      // Fail soft to raw HTML if conversion degenerates, so an agent always
+      // gets usable content; the echoed `format` makes the downgrade visible.
+      let markdown = "";
+      try {
+        markdown = htmlToMarkdown(content.html);
+      } catch (err) {
+        console.error("html-to-markdown failed", err);
+      }
+      if (markdown.trim().length > 0) {
+        outContent = markdown;
+        outContentType = "text/markdown";
+      } else {
+        outFormat = "html";
+      }
+    }
+
+    return c.json({
+      id,
+      version: content.version,
+      format: outFormat,
+      content_type: outContentType,
+      content: outContent,
+    });
+  });
+
   app.post("/artifacts/:id/expire", async (c) => {
     const artifact = await c.get("store").expireArtifact(c.req.param("id"));
     return c.json(artifactJson(artifact, c.env));
@@ -264,4 +324,22 @@ export function parseCommentStatus(status: string | undefined): CommentStatusFil
     return errorResponse("invalid_request", "status must be one of open, resolved, all.");
   }
   return status as CommentStatusFilter;
+}
+
+// Content read format: Markdown (default) or the raw stored HTML.
+export function parseContentFormat(format: string | undefined): "md" | "html" | Response {
+  if (format === undefined) return "md";
+  if (format !== "md" && format !== "html") {
+    return errorResponse("invalid_request", "format must be one of md, html.");
+  }
+  return format;
+}
+
+export function parseContentVersion(version: string | undefined): number | undefined | Response {
+  if (version === undefined) return undefined;
+  const parsed = Number(version);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return errorResponse("invalid_request", "version must be a positive integer.");
+  }
+  return parsed;
 }

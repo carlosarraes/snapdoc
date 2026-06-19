@@ -7,7 +7,10 @@ export type ErrorCode =
   | "invalid_ttl"
   | "unsupported_content_type"
   | "unauthorized"
+  | "passcode_required"
+  | "passcode_incorrect"
   | "not_found"
+  | "gone"
   | "not_active"
   | "too_large"
   | "rate_limited"
@@ -19,7 +22,10 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   invalid_ttl: 400,
   unsupported_content_type: 400,
   unauthorized: 401,
+  passcode_required: 401,
+  passcode_incorrect: 401,
   not_found: 404,
+  gone: 410,
   not_active: 409,
   too_large: 413,
   rate_limited: 429,

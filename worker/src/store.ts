@@ -45,7 +45,7 @@ export interface TokenRecord {
 }
 
 export type ServableContent =
-  | { state: "active"; html: string; contentType: string }
+  | { state: "active"; html: string; contentType: string; version: number }
   | { state: "expired" }
   | { state: "deleted" };
 
@@ -505,7 +505,7 @@ export class Store {
     if (!row) return null;
     const object = await this.blobs.get(row.r2_key);
     if (!object) return null;
-    return { state: "active", html: await object.text(), contentType: row.content_type };
+    return { state: "active", html: await object.text(), contentType: row.content_type, version: v };
   }
 
   // ---- comments (doc-level threads; authored by team via Access, read by agents) ----
