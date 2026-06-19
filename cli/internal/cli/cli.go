@@ -61,6 +61,7 @@ type CLI struct {
 	List     ListCmd     `cmd:"" help:"List your artifacts."`
 	Get      GetCmd      `cmd:"" help:"Show artifact metadata and versions."`
 	Comments CommentsCmd `cmd:"" help:"Read comments on an artifact."`
+	Read     ReadCmd     `cmd:"" help:"Read an artifact's content as Markdown (or --raw HTML)."`
 	Open     OpenCmd     `cmd:"" help:"Open an artifact in the browser."`
 	Delete   DeleteCmd   `cmd:"" help:"Delete an artifact."`
 	Expire   ExpireCmd   `cmd:"" help:"Expire an artifact now."`

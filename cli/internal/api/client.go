@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -178,6 +179,36 @@ func (c *Client) List(opts ListOptions) (*ListResult, error) {
 func (c *Client) Get(id string) (*GetResult, error) {
 	var res GetResult
 	if err := c.do("GET", "/v1/artifacts/"+url.PathEscape(id), nil, nil, "", &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+type ContentResult struct {
+	ID          string `json:"id"`
+	Version     int    `json:"version"`
+	Format      string `json:"format"`
+	ContentType string `json:"content_type"`
+	Content     string `json:"content"`
+}
+
+// ReadContent fetches an artifact's body. format is "md" (default) or "html";
+// version <= 0 means the latest. A non-empty passcode travels in the
+// X-Snapdoc-Passcode header (never a query param, which would be logged).
+func (c *Client) ReadContent(id, format string, version int, passcode string) (*ContentResult, error) {
+	q := url.Values{}
+	if format != "" {
+		q.Set("format", format)
+	}
+	if version > 0 {
+		q.Set("version", strconv.Itoa(version))
+	}
+	var headers map[string]string
+	if passcode != "" {
+		headers = map[string]string{"X-Snapdoc-Passcode": passcode}
+	}
+	var res ContentResult
+	if err := c.doH("GET", "/v1/artifacts/"+url.PathEscape(id)+"/content", q, nil, "", headers, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

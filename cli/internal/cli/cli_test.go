@@ -91,6 +91,7 @@ func setupEnv(t *testing.T) string {
 	t.Setenv("SNAPDOC_API_URL", "")
 	t.Setenv("SNAPDOC_TOKEN", "")
 	t.Setenv("SNAPDOC_BOOTSTRAP", "")
+	t.Setenv("SNAPDOC_PASSCODE", "")
 	return dir
 }
 
@@ -293,7 +294,10 @@ func TestErrorCodeRendering(t *testing.T) {
 		{code: "invalid_ttl", status: 400, message: "TTL outside 1h-90d bounds."},
 		{code: "unsupported_content_type", status: 400, message: "Unsupported content type."},
 		{code: "unauthorized", status: 401, message: "Missing or invalid token."},
+		{code: "passcode_required", status: 401, message: "Passcode required."},
+		{code: "passcode_incorrect", status: 401, message: "Passcode is incorrect."},
 		{code: "not_found", status: 404, message: "Unknown artifact."},
+		{code: "gone", status: 410, message: "Artifact is no longer available."},
 		{code: "not_active", status: 409, message: "Artifact is deleted."},
 		{code: "too_large", status: 413, message: "Artifact exceeds the 2 MB size limit."},
 		{code: "rate_limited", status: 429, message: "Over 100 publishes/hr.", header: map[string]string{"Retry-After": "120"}, extra: []string{"120"}},
@@ -1003,5 +1007,129 @@ func TestCommentsStatusFlag(t *testing.T) {
 	}
 	if srv.reqs[0].query["status"] != "open" {
 		t.Errorf("status query = %q, want open", srv.reqs[0].query["status"])
+	}
+}
+
+// --- read ---
+
+const contentEnvelopeJSON = `{"id":"x7Kp9qWm2AbCdE","version":2,"format":"md","content_type":"text/markdown","content":"# Hello\n\nWorld.\n"}`
+
+func TestReadPrintsMarkdownContent(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"read", "x7Kp9qWm2AbCdE"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "# Hello") || !strings.Contains(stdout, "World.") {
+		t.Errorf("stdout missing content:\n%s", stdout)
+	}
+	req := srv.reqs[0]
+	if req.method != "GET" || req.path != "/v1/artifacts/x7Kp9qWm2AbCdE/content" {
+		t.Errorf("got %s %s, want GET /v1/artifacts/x7Kp9qWm2AbCdE/content", req.method, req.path)
+	}
+	if req.query["format"] != "md" {
+		t.Errorf("format query = %q, want md", req.query["format"])
+	}
+}
+
+func TestReadRawSendsHTMLFormat(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"id":"x","version":1,"format":"html","content_type":"text/html","content":"<!doctype html><h1>Hi</h1>"}`)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"read", "x", "--raw"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].query["format"] != "html" {
+		t.Errorf("format = %q, want html", srv.reqs[0].query["format"])
+	}
+	if !strings.Contains(stdout, "<!doctype html>") {
+		t.Errorf("stdout missing html:\n%s", stdout)
+	}
+}
+
+func TestReadVersionFlag(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	if _, _, code := runCLI([]string{"read", "x", "--rev", "2"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].query["version"] != "2" {
+		t.Errorf("version = %q, want 2", srv.reqs[0].query["version"])
+	}
+}
+
+func TestReadPasscodeFlagSendsHeader(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	if _, _, code := runCLI([]string{"read", "x", "--passcode", "hunter2"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "hunter2" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want hunter2", srv.reqs[0].passcode)
+	}
+}
+
+func TestReadPasscodeEnvSendsHeader(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	t.Setenv("SNAPDOC_PASSCODE", "fromenv")
+	if _, _, code := runCLI([]string{"read", "x"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "fromenv" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want fromenv", srv.reqs[0].passcode)
+	}
+}
+
+func TestReadJSONOutput(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, _, code := runCLI([]string{"read", "x7Kp9qWm2AbCdE", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	for _, k := range []string{"id", "version", "format", "content_type", "content"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("missing %q key", k)
+		}
+	}
+}
+
+// A non-TTY stdin (runCLI uses a strings.Reader) is the agent path: a
+// passcode_required error must surface directly with no prompt and no retry.
+func TestReadPasscodeRequiredNonTTYSurfacesError(t *testing.T) {
+	dir := setupEnv(t)
+	srv := errServer(t, 401, "passcode_required", "Supply X-Snapdoc-Passcode.", nil)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	stdout, stderr, code := runCLI([]string{"read", "x"}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "passcode_required") {
+		t.Errorf("stderr %q missing passcode_required", stderr)
+	}
+	if len(srv.reqs) != 1 {
+		t.Errorf("made %d requests, want 1 (no prompt retry when non-interactive)", len(srv.reqs))
 	}
 }
