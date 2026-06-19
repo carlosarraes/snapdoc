@@ -47,8 +47,11 @@ Stable error codes (clients must switch on `code`, never on `message`):
 | 400 | `invalid_ttl` | TTL outside 1h–90d bounds |
 | 400 | `unsupported_content_type` | Not `text/html` or `text/markdown` |
 | 401 | `unauthorized` | Missing/invalid/revoked token or Access JWT |
+| 401 | `passcode_required` | Content read of a passcode-protected artifact without `X-Snapdoc-Passcode` |
+| 401 | `passcode_incorrect` | Wrong passcode for a protected artifact |
 | 404 | `not_found` | Unknown artifact/version/token id |
 | 409 | `not_active` | Update/expire on a deleted artifact |
+| 410 | `gone` | Content read of an expired or deleted artifact |
 | 413 | `too_large` | Body exceeds 2 MB |
 | 429 | `rate_limited` | Over 100 publishes/hr; honors `Retry-After` header (seconds) |
 | 500 | `internal` | Unexpected server error |
@@ -176,6 +179,35 @@ the stored artifact title when no `?title=` is given.
   `resolved`/`resolved_at`/`resolved_by` are thread state carried on the root;
   replies are always `resolved: false`. A `"truncated": true` flag appears if the
   (500) cap is hit. 404 `not_found` if the artifact does not exist.
+
+### GET /v1/artifacts/{id}/content — read content (Markdown by default)
+
+- Token-gated (any valid team token). Returns the artifact's body so an agent can
+  read a shared doc directly instead of scraping the public HTML page.
+- `?format=md|html` (default `md`). `md` reconstructs Markdown from the stored
+  HTML — far fewer tokens than HTML and terminal-friendly; `html` returns the raw
+  stored document. A bad value is `invalid_request`.
+- `?version=` (default latest) must be a positive integer, else `invalid_request`.
+- **Passcode-protected artifacts require the passcode** via the `X-Snapdoc-Passcode`
+  header — a valid token is necessary but **not sufficient**. Missing →
+  `passcode_required`; wrong → `passcode_incorrect`.
+- 200 →
+
+```json
+{
+  "id": "x7Kp9qWm2AbCdE",
+  "version": 2,
+  "format": "md",
+  "content_type": "text/markdown",
+  "content": "# Q3 plan review\n\n..."
+}
+```
+
+- `format` echoes what was actually produced: if `md` conversion degenerates the
+  server falls back to the raw HTML and reports `format: "html"`, so the downgrade
+  is visible. Reconstructed Markdown is best-effort and not guaranteed identical to
+  the author's original (only rendered HTML is stored). 404 `not_found` (unknown
+  artifact/version); 410 `gone` (expired/deleted).
 
 ### POST /v1/artifacts/{id}/expire — expire now
 

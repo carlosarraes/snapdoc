@@ -35,6 +35,10 @@ snapdoc publish report.html --title "Q3 review"
 
 # Pipe from stdin, quiet mode prints only the URL (ideal for scripts/agents)
 cat plan.md | snapdoc publish - --markdown --quiet
+
+# Read a shared doc's content straight to the terminal — Markdown by default
+# (fewer tokens than HTML, ideal for agents); --raw for the original HTML
+snapdoc read <id> > doc.md
 ```
 
 ## Commands
@@ -45,6 +49,7 @@ cat plan.md | snapdoc publish - --markdown --quiet
 | `list` | List your artifacts. Flags: `--status`, `--all` |
 | `get <id>` | Show artifact metadata and version history |
 | `comments <id>` | Read feedback left on an artifact |
+| `read <id>` | Print an artifact's content as Markdown (`--raw` for HTML, `--rev` for a version, `--passcode`/`SNAPDOC_PASSCODE` for protected docs) |
 | `open <id>` | Open an artifact in the browser |
 | `expire <id>` | Expire an artifact now (URL stops serving) |
 | `delete <id>` | Delete an artifact and its content |
@@ -71,7 +76,7 @@ Resolved with precedence **flag > env > config file > default**.
 | | |
 |---|---|
 | Config file | `~/.config/snapdoc/config.json` (mode `0600`) |
-| Env vars | `SNAPDOC_API_URL`, `SNAPDOC_TOKEN`, `SNAPDOC_BOOTSTRAP` |
+| Env vars | `SNAPDOC_API_URL`, `SNAPDOC_TOKEN`, `SNAPDOC_BOOTSTRAP`, `SNAPDOC_PASSCODE` |
 | Default API | `https://api.snapdoc.carraes.dev` |
 
 Limits: 2 MB max artifact, 14-day default TTL (max 90 days), 100 publishes/hour
