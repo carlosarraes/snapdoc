@@ -34,6 +34,9 @@ func (c *TokenCreateCmd) Run(g *Globals, streams *IO) error {
 	if err != nil {
 		return err
 	}
+	if g.JSON {
+		return writeJSON(streams.Stdout, tok)
+	}
 	fmt.Fprintf(streams.Stdout, "Token created: %s (%s)\n", tok.Name, tok.ID)
 	fmt.Fprintf(streams.Stdout, "Secret (shown only once, save it now):\n%s\n", tok.Token)
 	return nil
@@ -49,6 +52,9 @@ func (c *TokenListCmd) Run(g *Globals, streams *IO) error {
 	tokens, err := client.ListTokens()
 	if err != nil {
 		return err
+	}
+	if g.JSON {
+		return writeJSON(streams.Stdout, tokens)
 	}
 	w := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tNAME\tCREATED\tLAST USED\tREVOKED")
@@ -71,6 +77,9 @@ func (c *TokenRevokeCmd) Run(g *Globals, streams *IO) error {
 	res, err := client.RevokeToken(c.ID)
 	if err != nil {
 		return err
+	}
+	if g.JSON {
+		return writeJSON(streams.Stdout, res)
 	}
 	fmt.Fprintf(streams.Stdout, "Revoked %s at %s\n", res.ID, res.RevokedAt)
 	return nil

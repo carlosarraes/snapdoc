@@ -620,6 +620,71 @@ func TestTokenRevoke(t *testing.T) {
 	}
 }
 
+func TestTokenCreateJSON(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, `{"id":"tok_1","name":"ci-bot","token":"sd_live_supersecret","created_at":"2026-06-12T15:04:05Z"}`)
+	writeConfig(t, dir, srv.URL, "tok-admin")
+
+	stdout, stderr, code := runCLI([]string{"token", "create", "ci-bot", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if strings.Contains(stdout, "Token created:") || strings.Contains(stdout, "once") {
+		t.Errorf("--json output should be pure JSON, got:\n%s", stdout)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	for _, k := range []string{"id", "name", "token", "created_at"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("missing %q key", k)
+		}
+	}
+	if m["token"] != "sd_live_supersecret" {
+		t.Errorf("token = %v", m["token"])
+	}
+}
+
+func TestTokenListJSON(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"tokens":[{"id":"tok_1","name":"ci-bot","created_at":"c","last_used_at":"u","revoked_at":null}]}`)
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, _, code := runCLI([]string{"token", "list", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &arr); err != nil {
+		t.Fatalf("stdout not a JSON array: %v\n%s", err, stdout)
+	}
+	if len(arr) != 1 || arr[0]["id"] != "tok_1" {
+		t.Errorf("unexpected json: %s", stdout)
+	}
+}
+
+func TestTokenRevokeJSON(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, `{"id":"tok_1","revoked_at":"2026-06-12T16:00:00Z"}`)
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, _, code := runCLI([]string{"token", "revoke", "tok_1", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Contains(stdout, "Revoked ") {
+		t.Errorf("--json should not print human text:\n%s", stdout)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout)
+	}
+	if m["id"] != "tok_1" || m["revoked_at"] != "2026-06-12T16:00:00Z" {
+		t.Errorf("unexpected json: %s", stdout)
+	}
+}
+
 // --- whoami ---
 
 func TestWhoamiJSONOutput(t *testing.T) {
