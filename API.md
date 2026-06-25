@@ -20,7 +20,11 @@ server-side.
 
 | Limit | Value |
 |---|---|
-| Max artifact size | 2 MB (2,097,152 bytes) |
+| Max artifact (document) size | 2 MB (2,097,152 bytes) |
+| Max image size | 5 MB (5,242,880 bytes) |
+| Max images per publish | 20 |
+| Max bundle size (document + images) | 25 MB (26,214,400 bytes) |
+| Allowed image types | png, jpeg, gif, webp, avif (SVG not supported) |
 | Default TTL | 14 days |
 | Min TTL | 1 hour |
 | Max TTL | 90 days |
@@ -45,14 +49,15 @@ Stable error codes (clients must switch on `code`, never on `message`):
 |---|---|---|
 | 400 | `invalid_request` | Malformed body/params |
 | 400 | `invalid_ttl` | TTL outside 1h–90d bounds |
-| 400 | `unsupported_content_type` | Not `text/html` or `text/markdown` |
+| 400 | `unsupported_content_type` | Document not `text/html`/`text/markdown`, or an image not an allowed raster type |
+| 400 | `too_many_assets` | More than 20 images in one publish |
 | 401 | `unauthorized` | Missing/invalid/revoked token or Access JWT |
 | 401 | `passcode_required` | Content read of a passcode-protected artifact without `X-Snapdoc-Passcode` |
 | 401 | `passcode_incorrect` | Wrong passcode for a protected artifact |
 | 404 | `not_found` | Unknown artifact/version/token id |
 | 409 | `not_active` | Update/expire on a deleted artifact |
 | 410 | `gone` | Content read of an expired or deleted artifact |
-| 413 | `too_large` | Body exceeds 2 MB |
+| 413 | `too_large` | Document exceeds 2 MB, an image exceeds 5 MB, or the bundle exceeds 25 MB |
 | 429 | `rate_limited` | Over 100 publishes/hr; honors `Retry-After` header (seconds) |
 | 500 | `internal` | Unexpected server error |
 | 503 | `misconfigured` | Admin auth misconfigured server-side (e.g. Access env vars missing in production); admin routes fail closed |
@@ -115,9 +120,35 @@ a table of contents). Heading anchors are always added. Title precedence:
 explicit `?title=` > frontmatter `title` > default. The frontmatter title becomes
 the stored artifact title when no `?title=` is given.
 
+**Publishing with images (`multipart/form-data`).** To host images referenced by
+the document, send `Content-Type: multipart/form-data` instead of a raw body:
+
+- one `document` part — a file part whose own `Content-Type` is `text/html` or
+  `text/markdown` (the document body);
+- zero or more `image` parts — each a file part whose **filename is the exact
+  reference string as it appears in the document** (e.g. `diagram.png`,
+  `shots/a.png`).
+
+The server stores each image as a content-addressed blob (deduplicated by SHA-256),
+then rewrites the document's local `<img src>` references to their hosted URLs
+(`https://snapdoc.carraes.dev/{id}/a/{sha256}`). Markdown `![](…)` becomes `<img>`
+during rendering, so both Markdown and HTML documents are handled. Image bytes are
+validated by content sniffing (raster types only; **SVG is rejected**), not by the
+declared part type. Remote (`https://`), `data:`, and root-absolute references are
+left untouched. A local reference with no matching `image` part is also left as-is
+and reported back in `unresolved_refs`.
+
+The `?title=`, `?ttl=`, and `X-Snapdoc-Passcode` inputs work exactly as for a raw
+body. The 201 response is the Artifact object plus an additive `unresolved_refs`
+array, e.g. `{ ...artifact, "unresolved_refs": ["logo.png"] }`. The raw-body form
+(no images) is unchanged.
+
 ### POST /v1/artifacts/{id}/versions — publish new version (update)
 
-- Same body/params as publish (`ttl` if present re-extends expiry from now).
+- Same body/params as publish, including the `multipart/form-data` form for
+  images (`ttl` if present re-extends expiry from now). Images are deduplicated
+  against the artifact's existing assets, so re-publishing an unchanged image is
+  cheap.
 - Only the active artifact can be updated; token need not be the original creator (single-team trust model).
 - 201 → Artifact object with incremented `current_version`.
 - 404 `not_found`, 409 `not_active` if deleted. Updating an `expired` artifact reactivates it with the new version.
@@ -143,9 +174,16 @@ the stored artifact title when no `?title=` is given.
   "versions": [
     { "version": 1, "size_bytes": 31022, "content_type": "text/html", "created_at": "..." },
     { "version": 2, "size_bytes": 48213, "content_type": "text/html", "created_at": "..." }
+  ],
+  "assets": [
+    { "hash": "<sha256>", "content_type": "image/png", "size_bytes": 20480,
+      "url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/a/<sha256>", "created_at": "..." }
   ]
 }
 ```
+
+`assets` lists every hosted image across the artifact's versions (content-addressed,
+so shared across versions). It is `[]` when the artifact has no images.
 
 ### GET /v1/artifacts/{id}/comments — read comments (the agent loop)
 
@@ -273,6 +311,7 @@ intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there
 | `/` and non-ID paths | Static assets (landing) |
 | `/{id}` | 200 latest version HTML; 404 missing; 410 expired/deleted (distinct friendly pages) |
 | `/{id}/v/{n}` | Version-pinned; same state rules |
+| `/{id}/a/{sha256}` | Hosted image bytes; `Content-Type` from the stored type, `Cache-Control: public, max-age=31536000, immutable`, `nosniff`. Same status/passcode gate as the page (404 missing, 410 expired/deleted, 401 if locked). `/{id}/v/{n}/a/{sha256}` also accepted. |
 | `POST /{id}/unlock` | Passcode entry: form field `passcode`; 303 + viewer cookie on success, 401 unlock page on failure |
 
 Headers on artifact responses: `X-Robots-Tag: noindex, nofollow`,

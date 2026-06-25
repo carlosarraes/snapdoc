@@ -4,8 +4,9 @@ import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { htmlToMarkdown } from "./html-to-markdown";
-import { Store, StoreError, type ArtifactStatus, type TokenRecord } from "./store";
-import { artifactJson, commentJson, errorResponse, parseDuration, tokenJson, versionJson } from "./http";
+import { ALLOWED_IMAGE_TYPES, detectImageType } from "./assets";
+import { Store, StoreError, type ArtifactStatus, type TokenRecord, type UploadAsset } from "./store";
+import { artifactJson, assetJson, commentJson, errorResponse, parseDuration, tokenJson, versionJson } from "./http";
 import type { Env } from "./types";
 
 interface ApiVariables {
@@ -27,35 +28,19 @@ interface PublishInput {
   title: string | null;
   ttlSeconds?: number;
   passcode?: string;
+  assets?: UploadAsset[];
 }
 
-// Validates the shared publish inputs (content type, size, ttl, title) and
-// renders markdown to a self-contained HTML document. Returns a Response on
-// validation failure.
-export async function readPublishInput(
-  request: Request,
+// Validates ?title= and ?ttl= shared by both publish paths. Returns a Response
+// on failure.
+function validateTitleTtl(
   env: Env,
   query: { title?: string; ttl?: string },
-): Promise<PublishInput | Response> {
-  const rawType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
-  if (rawType !== "text/html" && rawType !== "text/markdown") {
-    return errorResponse(
-      "unsupported_content_type",
-      "Content-Type must be text/html or text/markdown.",
-    );
-  }
-
-  const maxBytes = Number(env.MAX_ARTIFACT_BYTES);
-  const contentLength = Number(request.headers.get("Content-Length") ?? "0");
-  if (contentLength > maxBytes) {
-    return errorResponse("too_large", "Artifact exceeds the 2 MB size limit.");
-  }
-
+): { title: string | null; ttlSeconds?: number } | Response {
   const title = query.title ?? null;
   if (title !== null && title.length > 200) {
     return errorResponse("invalid_request", "Title must be at most 200 characters.");
   }
-
   let ttlSeconds: number | undefined;
   if (query.ttl !== undefined) {
     const parsed = parseDuration(query.ttl);
@@ -66,6 +51,37 @@ export async function readPublishInput(
     }
     ttlSeconds = parsed;
   }
+  return { title, ttlSeconds };
+}
+
+// Validates the shared publish inputs (content type, size, ttl, title) and
+// renders markdown to a self-contained HTML document. A multipart/form-data
+// body (document + image parts) is handled separately. Returns a Response on
+// validation failure.
+export async function readPublishInput(
+  request: Request,
+  env: Env,
+  query: { title?: string; ttl?: string },
+): Promise<PublishInput | Response> {
+  const rawType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+  if (rawType === "multipart/form-data") {
+    return readMultipartPublishInput(request, env, query);
+  }
+  if (rawType !== "text/html" && rawType !== "text/markdown") {
+    return errorResponse(
+      "unsupported_content_type",
+      "Content-Type must be text/html, text/markdown, or multipart/form-data.",
+    );
+  }
+
+  const maxBytes = Number(env.MAX_ARTIFACT_BYTES);
+  const contentLength = Number(request.headers.get("Content-Length") ?? "0");
+  if (contentLength > maxBytes) {
+    return errorResponse("too_large", "Artifact exceeds the 2 MB size limit.");
+  }
+
+  const meta = validateTitleTtl(env, query);
+  if (meta instanceof Response) return meta;
 
   const raw = await request.text();
   if (new TextEncoder().encode(raw).byteLength > maxBytes) {
@@ -76,16 +92,110 @@ export async function readPublishInput(
   }
 
   let body = raw;
-  let resolvedTitle = title;
+  let resolvedTitle = meta.title;
   if (rawType === "text/markdown") {
-    const rendered = await renderMarkdown(raw, title ?? undefined);
+    const rendered = await renderMarkdown(raw, meta.title ?? undefined);
     body = rendered.html;
     // Fall back to a frontmatter title when no explicit ?title= was given.
     if (resolvedTitle === null) resolvedTitle = rendered.title;
   }
   // Passcode travels in a header (not a query param, which would be logged).
   const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
-  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds, passcode };
+  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds: meta.ttlSeconds, passcode };
+}
+
+// workers-types models FormData entries as `string`, but file parts arrive as
+// File at runtime — narrow through this view rather than fighting the types.
+type MultipartForm = {
+  get(name: string): File | string | null;
+  entries(): IterableIterator<[string, File | string]>;
+};
+
+// Handles a `multipart/form-data` publish: one `document` part (text/html or
+// text/markdown) plus N image parts whose part filename is the original ref.
+// Images are size/type-checked (magic-byte sniff; raster only) and the actual
+// upload + reference rewriting happen in the store.
+async function readMultipartPublishInput(
+  request: Request,
+  env: Env,
+  query: { title?: string; ttl?: string },
+): Promise<PublishInput | Response> {
+  const maxBundle = Number(env.MAX_BUNDLE_BYTES);
+  const maxImage = Number(env.MAX_IMAGE_BYTES);
+  const maxDoc = Number(env.MAX_ARTIFACT_BYTES);
+  const maxCount = Number(env.MAX_ASSET_COUNT);
+
+  const contentLength = Number(request.headers.get("Content-Length") ?? "0");
+  if (contentLength > maxBundle) {
+    return errorResponse("too_large", "Bundle exceeds the total size limit.");
+  }
+
+  let form: MultipartForm;
+  try {
+    form = (await request.formData()) as unknown as MultipartForm;
+  } catch {
+    return errorResponse("invalid_request", "Malformed multipart/form-data body.");
+  }
+
+  const doc = form.get("document");
+  if (doc === null || typeof doc === "string") {
+    return errorResponse("invalid_request", "A multipart publish requires a 'document' file part.");
+  }
+  const docType = (doc.type || "").split(";")[0].trim().toLowerCase();
+  if (docType !== "text/html" && docType !== "text/markdown") {
+    return errorResponse("unsupported_content_type", "The document part must be text/html or text/markdown.");
+  }
+
+  const imageFiles: File[] = [];
+  for (const [name, value] of form.entries()) {
+    if (name === "document") continue;
+    if (typeof value !== "string") imageFiles.push(value);
+  }
+  if (imageFiles.length > maxCount) {
+    return errorResponse("too_many_assets", `A publish may include at most ${maxCount} images.`);
+  }
+
+  const raw = await doc.text();
+  let total = new TextEncoder().encode(raw).byteLength;
+  if (total > maxDoc) {
+    return errorResponse("too_large", "Artifact exceeds the 2 MB size limit.");
+  }
+  if (raw.trim().length === 0) {
+    return errorResponse("invalid_request", "Artifact body must not be empty.");
+  }
+
+  const assets: UploadAsset[] = [];
+  for (const file of imageFiles) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.byteLength > maxImage) {
+      return errorResponse("too_large", `Image "${file.name}" exceeds the per-image size limit.`);
+    }
+    total += bytes.byteLength;
+    if (total > maxBundle) {
+      return errorResponse("too_large", "Bundle exceeds the total size limit.");
+    }
+    const detected = detectImageType(bytes);
+    if (!detected || !ALLOWED_IMAGE_TYPES.has(detected)) {
+      return errorResponse(
+        "unsupported_content_type",
+        `Image "${file.name}" is not a supported type (png, jpeg, gif, webp, avif).`,
+      );
+    }
+    assets.push({ ref: file.name, bytes, contentType: detected });
+  }
+
+  const meta = validateTitleTtl(env, query);
+  if (meta instanceof Response) return meta;
+
+  let body = raw;
+  let resolvedTitle = meta.title;
+  if (docType === "text/markdown") {
+    const rendered = await renderMarkdown(raw, meta.title ?? undefined);
+    body = rendered.html;
+    if (resolvedTitle === null) resolvedTitle = rendered.title;
+  }
+  const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
+  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds: meta.ttlSeconds, passcode, assets };
 }
 
 async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promise<Response | null> {
@@ -153,9 +263,13 @@ export function createPublisherApp(): Hono<ApiContext> {
       contentType: input.contentType,
       body: input.body,
       passcode: input.passcode,
+      assets: input.assets,
+      artifactHost: c.env.ARTIFACT_HOST,
     });
     await store.recordPublish(token.id);
-    return c.json(artifactJson(artifact, c.env), 201);
+    const json = artifactJson(artifact, c.env);
+    if (input.assets) json.unresolved_refs = artifact.unresolvedRefs ?? [];
+    return c.json(json, 201);
   });
 
   app.post("/artifacts/:id/versions", async (c) => {
@@ -176,9 +290,13 @@ export function createPublisherApp(): Hono<ApiContext> {
       defaultTtlSeconds: parseDuration(c.env.DEFAULT_TTL)!,
       contentType: input.contentType,
       body: input.body,
+      assets: input.assets,
+      artifactHost: c.env.ARTIFACT_HOST,
     });
     await store.recordPublish(token.id);
-    return c.json(artifactJson(artifact, c.env), 201);
+    const json = artifactJson(artifact, c.env);
+    if (input.assets) json.unresolved_refs = artifact.unresolvedRefs ?? [];
+    return c.json(json, 201);
   });
 
   app.get("/artifacts", async (c) => {
@@ -197,9 +315,11 @@ export function createPublisherApp(): Hono<ApiContext> {
     const store = c.get("store");
     const found = await store.getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
+    const assets = await store.listAssets(found.artifact.id);
     return c.json({
       artifact: artifactJson(found.artifact, c.env),
       versions: found.versions.map(versionJson),
+      assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
     });
   });
 

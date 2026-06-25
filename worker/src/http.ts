@@ -1,5 +1,5 @@
 // Shared HTTP helpers: error envelope, artifact JSON shape, duration parsing.
-import type { Artifact, ArtifactVersion, Comment, StoreErrorCode, TokenRecord } from "./store";
+import type { Artifact, ArtifactVersion, Comment, StoredAsset, StoreErrorCode, TokenRecord } from "./store";
 import type { Env } from "./types";
 
 export type ErrorCode =
@@ -13,6 +13,7 @@ export type ErrorCode =
   | "gone"
   | "not_active"
   | "too_large"
+  | "too_many_assets"
   | "rate_limited"
   | "misconfigured"
   | "internal";
@@ -28,6 +29,7 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   gone: 410,
   not_active: 409,
   too_large: 413,
+  too_many_assets: 400,
   rate_limited: 429,
   misconfigured: 503,
   internal: 500,
@@ -92,6 +94,16 @@ export function versionJson(version: ArtifactVersion) {
     size_bytes: version.sizeBytes,
     content_type: version.contentType,
     created_at: version.createdAt,
+  };
+}
+
+export function assetJson(artifactId: string, asset: StoredAsset, env: Env) {
+  return {
+    hash: asset.hash,
+    content_type: asset.contentType,
+    size_bytes: asset.sizeBytes,
+    url: `https://${env.ARTIFACT_HOST}/${artifactId}/a/${asset.hash}`,
+    created_at: asset.createdAt,
   };
 }
 

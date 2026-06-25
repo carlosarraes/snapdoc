@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -49,6 +52,17 @@ type Artifact struct {
 	ExpiresAt      string `json:"expires_at"`
 	HasPasscode    bool   `json:"has_passcode"`
 	TokenName      string `json:"token_name,omitempty"`
+	// UnresolvedRefs is set on a multipart publish: local image refs the server
+	// could not match to an uploaded file (left as-is in the document).
+	UnresolvedRefs []string `json:"unresolved_refs,omitempty"`
+}
+
+type Asset struct {
+	Hash        string `json:"hash"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+	URL         string `json:"url"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type Version struct {
@@ -64,6 +78,14 @@ type PublishOptions struct {
 	Passcode string
 }
 
+// AssetFile is a local image to upload alongside a document. Ref is the verbatim
+// reference string from the document (sent as the multipart filename so the
+// server can match and rewrite it); Path is the local file to read.
+type AssetFile struct {
+	Ref  string
+	Path string
+}
+
 type ListOptions struct {
 	Status string
 	Cursor string
@@ -77,6 +99,7 @@ type ListResult struct {
 type GetResult struct {
 	Artifact Artifact  `json:"artifact"`
 	Versions []Version `json:"versions"`
+	Assets   []Asset   `json:"assets,omitempty"`
 }
 
 type DeleteResult struct {
@@ -156,6 +179,73 @@ func (c *Client) publish(path string, content io.Reader, contentType string, opt
 	}
 	var a Artifact
 	if err := c.doH("POST", path, q, content, contentType, headers, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// PublishMultipart creates an artifact from a document plus its referenced
+// images. The server uploads the images and rewrites the document's local
+// <img> refs to hosted URLs.
+func (c *Client) PublishMultipart(content io.Reader, contentType string, assets []AssetFile, opts PublishOptions) (*Artifact, error) {
+	return c.publishMultipart("/v1/artifacts", content, contentType, assets, opts)
+}
+
+func (c *Client) PublishVersionMultipart(id string, content io.Reader, contentType string, assets []AssetFile, opts PublishOptions) (*Artifact, error) {
+	return c.publishMultipart("/v1/artifacts/"+url.PathEscape(id)+"/versions", content, contentType, assets, opts)
+}
+
+func (c *Client) publishMultipart(path string, content io.Reader, contentType string, assets []AssetFile, opts PublishOptions) (*Artifact, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	// The document part carries its own Content-Type so the server knows whether
+	// to render markdown; image parts are sniffed server-side, so their declared
+	// type does not matter (the part filename is the ref the server matches).
+	docHeader := textproto.MIMEHeader{}
+	docHeader.Set("Content-Disposition", `form-data; name="document"; filename="document"`)
+	docHeader.Set("Content-Type", contentType)
+	docPart, err := mw.CreatePart(docHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(docPart, content); err != nil {
+		return nil, err
+	}
+
+	for _, a := range assets {
+		f, err := os.Open(a.Path)
+		if err != nil {
+			return nil, err
+		}
+		part, err := mw.CreateFormFile("image", a.Ref)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		if _, err := io.Copy(part, f); err != nil {
+			f.Close()
+			return nil, err
+		}
+		f.Close()
+	}
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+
+	q := url.Values{}
+	if opts.Title != "" {
+		q.Set("title", opts.Title)
+	}
+	if opts.TTL != "" {
+		q.Set("ttl", opts.TTL)
+	}
+	var headers map[string]string
+	if opts.Passcode != "" {
+		headers = map[string]string{"X-Snapdoc-Passcode": opts.Passcode}
+	}
+	var a Artifact
+	if err := c.doH("POST", path, q, &buf, mw.FormDataContentType(), headers, &a); err != nil {
 		return nil, err
 	}
 	return &a, nil

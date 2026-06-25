@@ -6,6 +6,9 @@ import type { Env } from "./types";
 
 const ID_PATTERN = /^\/([A-Za-z0-9_-]{14})(?:\/v\/(\d+))?$/;
 const UNLOCK_PATTERN = /^\/([A-Za-z0-9_-]{14})\/unlock$/;
+// Hosted asset: /{id}/a/{sha256} (the optional /v/{n} segment is accepted but
+// cosmetic — assets are looked up by (id, hash), which is immutable).
+const ASSET_PATTERN = /^\/([A-Za-z0-9_-]{14})(?:\/v\/\d+)?\/a\/([0-9a-f]{64})$/;
 
 // Self-contained inline CSS/JS may run, but the page gets no privileged
 // reach: no external network targets beyond https/data images & fonts, no
@@ -35,6 +38,14 @@ const UNLOCK_CSP = [
 const BASE_HEADERS: Record<string, string> = {
   "X-Robots-Tag": "noindex, nofollow",
   "Content-Security-Policy": ARTIFACT_CSP,
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+};
+
+// Assets are raw image bytes, not HTML — no CSP needed, but keep them
+// unindexed, referrer-free, and immune to MIME sniffing.
+const ASSET_HEADERS: Record<string, string> = {
+  "X-Robots-Tag": "noindex, nofollow",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
 };
@@ -158,6 +169,32 @@ async function handleUnlock(id: string, request: Request, store: Store): Promise
   });
 }
 
+// Serves a hosted image. Reuses the artifact gate so an asset can never outlive
+// or out-permission its page: same status (404/410) and passcode rules apply.
+async function serveAsset(id: string, hash: string, request: Request, store: Store): Promise<Response> {
+  const gate = await store.getArtifactGate(id);
+  if (!gate) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+  if (gate.status === "expired" || gate.status === "deleted") {
+    return new Response("Gone", { status: 410, headers: ASSET_HEADERS });
+  }
+  if (gate.hasPasscode) {
+    const cookie = readCookie(request, `sd_unlock_${id}`);
+    const unlocked = cookie ? await store.checkViewerToken(id, cookie) : false;
+    if (!unlocked) return new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS });
+  }
+  const asset = await store.getServableAsset(id, hash);
+  if (!asset) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+
+  const headers: Record<string, string> = {
+    ...ASSET_HEADERS,
+    "Content-Type": asset.contentType,
+    // Content-addressed → safe to cache forever; protected → never cache.
+    "Cache-Control": gate.hasPasscode ? "private, no-store" : "public, max-age=31536000, immutable",
+  };
+  if (request.method === "HEAD") headers["Content-Length"] = String(asset.size);
+  return new Response(request.method === "HEAD" ? null : asset.body, { status: 200, headers });
+}
+
 export async function serveArtifactHost(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
@@ -192,6 +229,14 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
       return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
     }
     return handleUnlock(unlockMatch[1], request, store);
+  }
+
+  const assetMatch = ASSET_PATTERN.exec(url.pathname);
+  if (assetMatch) {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+    return serveAsset(assetMatch[1], assetMatch[2], request, store);
   }
 
   const match = ID_PATTERN.exec(url.pathname);

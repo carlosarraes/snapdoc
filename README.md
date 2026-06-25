@@ -45,7 +45,7 @@ snapdoc read <id> > doc.md
 
 | Command | Description |
 |---------|-------------|
-| `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--quiet/-q` |
+| `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--no-assets`, `--assets-base <dir>`, `--quiet/-q` |
 | `list` | List your artifacts. Flags: `--status`, `--all` |
 | `get <id>` | Show artifact metadata and version history |
 | `comments <id>` | Read feedback left on an artifact |
@@ -57,6 +57,7 @@ snapdoc read <id> > doc.md
 | `token list` / `token revoke <id>` | Manage tokens (admin) |
 | `login` | Save API URL and token to the config file |
 | `whoami` | Show which token you're authenticated as (verifies the token works) |
+| `llm` | Print a compact, agent-oriented guide to the whole CLI |
 
 `--json` (global) prints raw JSON instead of human text — handy for scripts and agents.
 `--passcode` protects a new artifact; viewers get a browser unlock page. Markdown
@@ -69,6 +70,14 @@ version — closing the publish → review → iterate loop.
 `--update <id>` publishes a new version while keeping the same stable URL;
 every other publish mints a new immutable artifact.
 
+**Images:** reference them with normal relative paths
+(`![](diagram.png)`, `<img src="shots/a.png">`) and `publish` uploads the local
+files next to your document, hosts them, and rewrites the references to hosted
+URLs — remote `https://` and `data:` refs are left untouched. Use `--assets-base
+<dir>` when images live in another folder, or `--no-assets` to disable. Limits:
+≤5 MB/image, ≤20 images, ≤25 MB total; png/jpeg/gif/webp/avif (SVG unsupported).
+Run `snapdoc llm` for a compact, copy-pasteable guide aimed at agents.
+
 ## Configuration
 
 Resolved with precedence **flag > env > config file > default**.
@@ -79,9 +88,10 @@ Resolved with precedence **flag > env > config file > default**.
 | Env vars | `SNAPDOC_API_URL`, `SNAPDOC_TOKEN`, `SNAPDOC_BOOTSTRAP`, `SNAPDOC_PASSCODE` |
 | Default API | `https://api.snapdoc.carraes.dev` |
 
-Limits: 2 MB max artifact, 14-day default TTL (max 90 days), 100 publishes/hour
-per token. Artifacts are served from a cookie-free origin with
-`noindex, nofollow` and unguessable 14-character IDs.
+Limits: 2 MB max document (plus ≤5 MB/image, ≤20 images, ≤25 MB bundle), 14-day
+default TTL (max 90 days), 100 publishes/hour per token. Artifacts are served
+from a cookie-free origin with `noindex, nofollow` and unguessable 14-character
+IDs.
 
 ## Architecture
 

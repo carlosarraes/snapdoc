@@ -6,19 +6,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/carlosarraes/snapdoc/cli/internal/api"
 )
 
 type PublishCmd struct {
-	File     string `arg:"" optional:"" help:"File to publish; '-' or omitted reads stdin."`
-	Title    string `help:"Artifact title."`
-	TTL      string `help:"Time to live, e.g. 12h, 7d (server-validated)."`
-	Update   string `help:"Artifact ID to update with a new version." placeholder:"ID"`
-	Markdown bool   `help:"Treat input as Markdown (auto-detected for .md/.markdown files)."`
-	Passcode string `help:"Protect a new artifact with a passcode (applies only when creating)."`
-	Quiet    bool   `short:"q" help:"Print only the artifact URL."`
+	File       string `arg:"" optional:"" help:"File to publish; '-' or omitted reads stdin."`
+	Title      string `help:"Artifact title."`
+	TTL        string `help:"Time to live, e.g. 12h, 7d (server-validated)."`
+	Update     string `help:"Artifact ID to update with a new version." placeholder:"ID"`
+	Markdown   bool   `help:"Treat input as Markdown (auto-detected for .md/.markdown files)."`
+	Passcode   string `help:"Protect a new artifact with a passcode (applies only when creating)."`
+	NoAssets   bool   `help:"Don't auto-upload local images; publish references as-is."`
+	AssetsBase string `help:"Directory to resolve relative image paths against (default: the document's folder, or CWD for stdin)." placeholder:"DIR"`
+	Quiet      bool   `short:"q" help:"Print only the artifact URL."`
 }
 
 func (p *PublishCmd) Run(g *Globals, streams *IO) error {
@@ -36,12 +39,27 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 		return err
 	}
 	opts := api.PublishOptions{Title: p.Title, TTL: p.TTL}
+
+	var assets []api.AssetFile
+	if !p.NoAssets {
+		refs := extractImageRefs(string(content), contentType == "text/markdown")
+		assets = resolveAssets(refs, p.assetsBaseDir(), streams.Stderr, p.Quiet)
+	}
+
 	var artifact *api.Artifact
 	if p.Update != "" {
-		artifact, err = client.PublishVersion(p.Update, bytes.NewReader(content), contentType, opts)
+		if len(assets) > 0 {
+			artifact, err = client.PublishVersionMultipart(p.Update, bytes.NewReader(content), contentType, assets, opts)
+		} else {
+			artifact, err = client.PublishVersion(p.Update, bytes.NewReader(content), contentType, opts)
+		}
 	} else {
 		opts.Passcode = p.Passcode // passcode is set only when creating an artifact
-		artifact, err = client.Publish(bytes.NewReader(content), contentType, opts)
+		if len(assets) > 0 {
+			artifact, err = client.PublishMultipart(bytes.NewReader(content), contentType, assets, opts)
+		} else {
+			artifact, err = client.Publish(bytes.NewReader(content), contentType, opts)
+		}
 	}
 	if err != nil {
 		return err
@@ -65,6 +83,18 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 	fmt.Fprintf(streams.Stdout, "  Expires: %s\n", artifact.ExpiresAt)
 	fmt.Fprintf(streams.Stdout, "  URL:     %s\n", artifact.URL)
 	return nil
+}
+
+// assetsBaseDir is where relative image refs are resolved: an explicit
+// --assets-base wins, else the document's own folder, else CWD (for stdin).
+func (p *PublishCmd) assetsBaseDir() string {
+	if p.AssetsBase != "" {
+		return p.AssetsBase
+	}
+	if p.File != "" && p.File != "-" {
+		return filepath.Dir(p.File)
+	}
+	return "."
 }
 
 func (p *PublishCmd) readInput(stdin io.Reader) ([]byte, error) {

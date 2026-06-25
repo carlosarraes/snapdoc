@@ -198,6 +198,38 @@ export function ArtifactDetail() {
               </tbody>
             </table>
           </div>
+
+          {meta.data?.assets && meta.data.assets.length > 0 && (
+            <>
+              <div className="section-label">images ({meta.data.assets.length})</div>
+              <div className="card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th className="num">Size</th>
+                      <th>Hash</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {meta.data.assets.map((asset) => (
+                      <tr key={asset.hash}>
+                        <td className="muted">{asset.content_type}</td>
+                        <td className="num">{formatBytes(asset.size_bytes)}</td>
+                        <td className="muted">{asset.hash.slice(0, 12)}…</td>
+                        <td>
+                          <a href={asset.url} target="_blank" rel="noreferrer">
+                            view ↗
+                          </a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </>
       )}
 

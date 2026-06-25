@@ -155,6 +155,17 @@ The default deployment platform is Cloudflare Workers + R2 + D1 because the prod
 - API responses should be suitable for both humans and machines. Errors should have stable codes/messages for agent recovery.
 - The product should reserve clear future expansion points for custom domains, company SSO, comments, analytics, billing, and MCP integrations.
 
+## Image Hosting (post-v1)
+
+Refines the v1 "self-contained, no separate asset uploads" stance for the common case of a report that references local images. Full multi-file site hosting and a general media library remain out of scope.
+
+- A publish may bundle the document plus the images it references in one atomic `multipart/form-data` request; the JSON/raw-body publish is unchanged. The capability is API-first: the CLI auto-detects and attaches local image refs, but the server owns upload and reference rewriting so every client behaves identically.
+- Images are stored as separate, content-addressed (SHA-256) R2 blobs under the artifact, deduplicated across versions, and served from the artifact origin at `/{id}/a/{sha256}` with the same status/passcode gate as the page.
+- The server rewrites the document's local `<img src>` references to hosted URLs; remote, `data:`, and absolute refs pass through untouched, and unmatched local refs are reported in `unresolved_refs`.
+- Each version carries the images it references (atomic bundle); changing an image is a new version. There is no standalone asset CRUD.
+- Raster formats only (png/jpeg/gif/webp/avif); SVG is rejected to avoid script-in-SVG XSS via direct navigation to an asset URL. Limits: ≤5 MB/image, ≤20 images, ≤25 MB bundle; the document stays ≤2 MB.
+- Agent discoverability: `publish --help` documents the behavior, and a `snapdoc llm` command prints a compact, agent-oriented guide to the whole CLI.
+
 ## Testing Decisions
 
 - Good tests should verify externally observable behavior rather than implementation details. For example, tests should assert that publishing returns a URL, creates metadata, stores content, and serves the artifact with correct access behavior; they should not assert private helper calls or database query shapes.
@@ -177,7 +188,7 @@ The default deployment platform is Cloudflare Workers + R2 + D1 because the prod
 - MCP integration for v1.
 - Browser extensions.
 - Multi-file site hosting or directory deploys.
-- Separate asset upload/media library.
+- Standalone asset upload / general media library (referenced-image bundling exists — see Image Hosting).
 - Visual HTML editing.
 - Inline comments.
 - Agent-readable comment resolution.

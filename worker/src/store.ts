@@ -1,5 +1,6 @@
 // Deep module owning all R2 + D1 access and artifact/token lifecycle rules.
 // No raw SQL should exist outside this file.
+import { normalizeRef, rewriteImageRefs } from "./assets";
 
 export type ArtifactStatus = "active" | "expired" | "deleted";
 
@@ -19,6 +20,21 @@ export interface Artifact {
 
 export interface ArtifactVersion {
   version: number;
+  contentType: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+// An image attached to a publish: `ref` is the verbatim reference string from
+// the document (used to match and rewrite it), `bytes`/`contentType` the file.
+export interface UploadAsset {
+  ref: string;
+  bytes: Uint8Array;
+  contentType: string;
+}
+
+export interface StoredAsset {
+  hash: string;
   contentType: string;
   sizeBytes: number;
   createdAt: string;
@@ -80,6 +96,11 @@ async function sha256Hex(text: string): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
+async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return bytesToHex(new Uint8Array(digest));
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -136,6 +157,10 @@ function isoNow(now?: Date): string {
 
 function r2Key(artifactId: string, version: number): string {
   return `artifacts/${artifactId}/v${version}`;
+}
+
+function assetR2Key(artifactId: string, hash: string): string {
+  return `artifacts/${artifactId}/assets/${hash}`;
 }
 
 interface ArtifactRow {
@@ -303,12 +328,13 @@ export class Store {
     contentType: string;
     body: string;
     passcode?: string;
-  }): Promise<Artifact> {
+    assets?: UploadAsset[];
+    artifactHost?: string;
+  }): Promise<Artifact & { unresolvedRefs?: string[] }> {
     const id = randomId(ARTIFACT_ID_LENGTH);
     const now = new Date();
     const createdAt = isoNow(now);
     const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
-    const sizeBytes = new TextEncoder().encode(input.body).byteLength;
 
     let passcodeHash: string | null = null;
     let passcodeSalt: string | null = null;
@@ -317,16 +343,84 @@ export class Store {
       passcodeHash = await derivePasscodeHash(input.passcode, passcodeSalt);
     }
 
-    await this.blobs.put(r2Key(id, 1), input.body, { httpMetadata: { contentType: input.contentType } });
+    const prepared = await this.prepareAssets(id, input.body, input.assets, input.artifactHost, createdAt);
+
+    await this.blobs.put(r2Key(id, 1), prepared.body, { httpMetadata: { contentType: input.contentType } });
     await this.db.batch([
       this.db
         .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7)")
         .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt),
       this.db
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)")
-        .bind(id, r2Key(id, 1), input.contentType, sizeBytes, createdAt),
+        .bind(id, r2Key(id, 1), input.contentType, prepared.sizeBytes, createdAt),
+      ...prepared.assetStatements,
     ]);
-    return (await this.fetchArtifact(id))!;
+    const artifact = (await this.fetchArtifact(id))!;
+    return input.assets && input.assets.length ? { ...artifact, unresolvedRefs: prepared.unresolvedRefs } : artifact;
+  }
+
+  // ---- assets (content-addressed images hosted with an artifact) ----
+
+  // Uploads each image to R2, rewrites the document's local <img src> refs to
+  // their hosted URLs, and returns the D1 inserts to fold into the artifact's
+  // write batch (so asset rows commit atomically with the version, after the
+  // artifact row that they reference). Dedups identical images by content hash.
+  private async prepareAssets(
+    id: string,
+    body: string,
+    assets: UploadAsset[] | undefined,
+    artifactHost: string | undefined,
+    createdAt: string,
+  ): Promise<{ body: string; sizeBytes: number; assetStatements: D1PreparedStatement[]; unresolvedRefs: string[] }> {
+    if (!assets || assets.length === 0) {
+      return { body, sizeBytes: new TextEncoder().encode(body).byteLength, assetStatements: [], unresolvedRefs: [] };
+    }
+
+    const refToHash = new Map<string, string>();
+    const rows = new Map<string, { contentType: string; sizeBytes: number }>();
+    for (const asset of assets) {
+      const hash = await sha256HexBytes(asset.bytes);
+      await this.blobs.put(assetR2Key(id, hash), asset.bytes, { httpMetadata: { contentType: asset.contentType } });
+      refToHash.set(normalizeRef(asset.ref), hash);
+      if (!rows.has(hash)) rows.set(hash, { contentType: asset.contentType, sizeBytes: asset.bytes.byteLength });
+    }
+
+    const host = artifactHost ?? "";
+    const { html, unresolved } = await rewriteImageRefs(body, (ref) => {
+      const hash = refToHash.get(ref);
+      return hash ? `https://${host}/${id}/a/${hash}` : null;
+    });
+
+    const assetStatements = [...rows.entries()].map(([hash, row]) =>
+      this.db
+        .prepare(
+          "INSERT INTO assets (artifact_id, hash, content_type, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(artifact_id, hash) DO NOTHING",
+        )
+        .bind(id, hash, row.contentType, row.sizeBytes, createdAt),
+    );
+
+    return { body: html, sizeBytes: new TextEncoder().encode(html).byteLength, assetStatements, unresolvedRefs: unresolved };
+  }
+
+  async listAssets(id: string): Promise<StoredAsset[]> {
+    const { results } = await this.db
+      .prepare("SELECT hash, content_type, size_bytes, created_at FROM assets WHERE artifact_id = ?1 ORDER BY created_at ASC, hash ASC")
+      .bind(id)
+      .all<{ hash: string; content_type: string; size_bytes: number; created_at: string }>();
+    return results.map((r) => ({ hash: r.hash, contentType: r.content_type, sizeBytes: r.size_bytes, createdAt: r.created_at }));
+  }
+
+  // Fetches an asset blob for serving. The caller (serve layer) is responsible
+  // for the artifact gate (status/passcode) before calling this.
+  async getServableAsset(id: string, hash: string): Promise<{ body: ReadableStream; contentType: string; size: number } | null> {
+    const row = await this.db
+      .prepare("SELECT content_type FROM assets WHERE artifact_id = ?1 AND hash = ?2")
+      .bind(id, hash)
+      .first<{ content_type: string }>();
+    if (!row) return null;
+    const object = await this.blobs.get(assetR2Key(id, hash));
+    if (!object) return null;
+    return { body: object.body, contentType: row.content_type, size: object.size };
   }
 
   // ---- passcode access control ----
@@ -377,8 +471,16 @@ export class Store {
 
   async addVersion(
     id: string,
-    input: { title?: string | null; ttlSeconds?: number; defaultTtlSeconds: number; contentType: string; body: string },
-  ): Promise<Artifact> {
+    input: {
+      title?: string | null;
+      ttlSeconds?: number;
+      defaultTtlSeconds: number;
+      contentType: string;
+      body: string;
+      assets?: UploadAsset[];
+      artifactHost?: string;
+    },
+  ): Promise<Artifact & { unresolvedRefs?: string[] }> {
     const current = await this.fetchArtifact(id);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
@@ -386,7 +488,6 @@ export class Store {
     const now = new Date();
     const createdAt = isoNow(now);
     const version = current.currentVersion + 1;
-    const sizeBytes = new TextEncoder().encode(input.body).byteLength;
 
     let expiresAt = current.expiresAt;
     if (input.ttlSeconds !== undefined) {
@@ -397,16 +498,20 @@ export class Store {
     }
     const title = input.title !== undefined && input.title !== null ? input.title : current.title;
 
-    await this.blobs.put(r2Key(id, version), input.body, { httpMetadata: { contentType: input.contentType } });
+    const prepared = await this.prepareAssets(id, input.body, input.assets, input.artifactHost, createdAt);
+
+    await this.blobs.put(r2Key(id, version), prepared.body, { httpMetadata: { contentType: input.contentType } });
     await this.db.batch([
       this.db
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
-        .bind(id, version, r2Key(id, version), input.contentType, sizeBytes, createdAt),
+        .bind(id, version, r2Key(id, version), input.contentType, prepared.sizeBytes, createdAt),
       this.db
         .prepare("UPDATE artifacts SET status = 'active', current_version = ?1, expires_at = ?2, title = ?3, blobs_purged_at = NULL WHERE id = ?4")
         .bind(version, expiresAt, title, id),
+      ...prepared.assetStatements,
     ]);
-    return (await this.fetchArtifact(id))!;
+    const artifact = (await this.fetchArtifact(id))!;
+    return input.assets && input.assets.length ? { ...artifact, unresolvedRefs: prepared.unresolvedRefs } : artifact;
   }
 
   async getArtifact(id: string): Promise<{ artifact: Artifact; versions: ArtifactVersion[] } | null> {
@@ -669,11 +774,16 @@ export class Store {
   }
 
   private async purgeBlobs(id: string): Promise<void> {
-    const { results } = await this.db
+    const versions = await this.db
       .prepare("SELECT r2_key FROM versions WHERE artifact_id = ?1")
       .bind(id)
       .all<{ r2_key: string }>();
-    if (results.length) await this.blobs.delete(results.map((r) => r.r2_key));
+    const assets = await this.db
+      .prepare("SELECT hash FROM assets WHERE artifact_id = ?1")
+      .bind(id)
+      .all<{ hash: string }>();
+    const keys = [...versions.results.map((r) => r.r2_key), ...assets.results.map((a) => assetR2Key(id, a.hash))];
+    if (keys.length) await this.blobs.delete(keys);
   }
 }
 

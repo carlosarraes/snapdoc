@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -166,7 +168,8 @@ func TestListNullCursor(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	var cap capture
-	body := `{"artifact":` + artifactJSON + `,"versions":[{"version":1,"size_bytes":31022,"content_type":"text/html","created_at":"2026-06-12T15:04:05Z"}]}`
+	body := `{"artifact":` + artifactJSON + `,"versions":[{"version":1,"size_bytes":31022,"content_type":"text/html","created_at":"2026-06-12T15:04:05Z"}],` +
+		`"assets":[{"hash":"abc123","content_type":"image/png","size_bytes":2048,"url":"https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/a/abc123","created_at":"2026-06-12T15:04:05Z"}]}`
 	srv := contractServer(t, &cap, 200, body, nil)
 	defer srv.Close()
 
@@ -180,6 +183,9 @@ func TestGet(t *testing.T) {
 	}
 	if res.Artifact.ID != "x7Kp9qWm2AbCdE" || len(res.Versions) != 1 || res.Versions[0].Version != 1 {
 		t.Errorf("get = %+v", res)
+	}
+	if len(res.Assets) != 1 || res.Assets[0].Hash != "abc123" || res.Assets[0].ContentType != "image/png" {
+		t.Errorf("assets = %+v", res.Assets)
 	}
 }
 
@@ -387,5 +393,75 @@ func TestCreateTokenBootstrapPath(t *testing.T) {
 	}
 	if cap.auth != "Bearer bootstrap-secret" {
 		t.Errorf("Authorization = %q", cap.auth)
+	}
+}
+
+func TestPublishMultipart(t *testing.T) {
+	dir := t.TempDir()
+	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	if err := os.WriteFile(filepath.Join(dir, "diagram.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var docType, docBody string
+	var dispositions []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Errorf("MultipartReader: %v", err)
+			return
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("NextPart: %v", err)
+				return
+			}
+			dispositions = append(dispositions, part.Header.Get("Content-Disposition"))
+			if part.FormName() == "document" {
+				docType = part.Header.Get("Content-Type")
+				b, _ := io.ReadAll(part)
+				docBody = string(b)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		io.WriteString(w, artifactJSON)
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "sd_live_abc"}
+	a, err := c.PublishMultipart(
+		strings.NewReader("# r\n\n![d](diagram.png)\n"),
+		"text/markdown",
+		[]AssetFile{
+			{Ref: "diagram.png", Path: filepath.Join(dir, "diagram.png")},
+			{Ref: "shots/a.png", Path: filepath.Join(dir, "a.png")},
+		},
+		PublishOptions{Title: "R"},
+	)
+	if err != nil {
+		t.Fatalf("PublishMultipart() error = %v", err)
+	}
+	if a.ID != "x7Kp9qWm2AbCdE" {
+		t.Errorf("artifact = %+v", a)
+	}
+	if docType != "text/markdown" {
+		t.Errorf("document Content-Type = %q, want text/markdown", docType)
+	}
+	if !strings.Contains(docBody, "![d](diagram.png)") {
+		t.Errorf("document body = %q", docBody)
+	}
+	joined := strings.Join(dispositions, "\n")
+	for _, want := range []string{`name="document"`, `filename="diagram.png"`, `filename="shots/a.png"`} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("dispositions %q missing %q", joined, want)
+		}
 	}
 }

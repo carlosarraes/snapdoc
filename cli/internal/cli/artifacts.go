@@ -93,7 +93,20 @@ func (c *GetCmd) Run(g *Globals, streams *IO) error {
 	for _, v := range res.Versions {
 		fmt.Fprintf(w, "%d\t%d\t%s\t%s\n", v.Version, v.SizeBytes, v.ContentType, v.CreatedAt)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	if len(res.Assets) > 0 {
+		fmt.Fprintf(streams.Stdout, "\nImages (%d):\n", len(res.Assets))
+		aw := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(aw, "TYPE\tSIZE\tURL")
+		for _, asset := range res.Assets {
+			fmt.Fprintf(aw, "%s\t%d\t%s\n", asset.ContentType, asset.SizeBytes, asset.URL)
+		}
+		return aw.Flush()
+	}
+	return nil
 }
 
 type DeleteCmd struct {

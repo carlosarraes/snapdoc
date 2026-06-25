@@ -7,7 +7,7 @@
 // can be minted headlessly.
 import { Hono } from "hono";
 import { mapStoreError, parseCommentStatus, parseListParams } from "./api";
-import { artifactJson, commentJson, errorResponse, versionJson } from "./http";
+import { artifactJson, assetJson, commentJson, errorResponse, versionJson } from "./http";
 import { Store } from "./store";
 import type { Env } from "./types";
 
@@ -196,11 +196,14 @@ export function createAdminApp(): Hono<AdminCtx> {
   });
 
   app.get("/artifacts/:id", async (c) => {
-    const found = await c.get("store").getArtifact(c.req.param("id"));
+    const store = c.get("store");
+    const found = await store.getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
+    const assets = await store.listAssets(found.artifact.id);
     return c.json({
       artifact: artifactJson(found.artifact, c.env, { admin: true }),
       versions: found.versions.map(versionJson),
+      assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
     });
   });
 

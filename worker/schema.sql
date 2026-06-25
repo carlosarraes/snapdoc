@@ -30,6 +30,18 @@ CREATE TABLE IF NOT EXISTS versions (
   PRIMARY KEY (artifact_id, version)
 );
 
+-- Content-addressed images hosted with an artifact. Keyed by (artifact_id,
+-- sha256) so the same image across versions is stored once. The rewritten
+-- hosted URL is baked into the stored HTML, so serving needs only id and hash.
+CREATE TABLE IF NOT EXISTS assets (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  hash TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (artifact_id, hash)
+);
+
 CREATE TABLE IF NOT EXISTS publish_events (
   token_id TEXT NOT NULL,
   created_at TEXT NOT NULL

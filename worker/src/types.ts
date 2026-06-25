@@ -5,6 +5,9 @@ export interface Env {
   ARTIFACT_HOST: string;
   API_HOST: string;
   MAX_ARTIFACT_BYTES: string;
+  MAX_IMAGE_BYTES: string;
+  MAX_BUNDLE_BYTES: string;
+  MAX_ASSET_COUNT: string;
   DEFAULT_TTL: string;
   MAX_TTL: string;
   MIN_TTL: string;

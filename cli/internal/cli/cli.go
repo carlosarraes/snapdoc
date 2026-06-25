@@ -68,6 +68,7 @@ type CLI struct {
 	Token    TokenCmd    `cmd:"" help:"Manage API tokens (admin)."`
 	Login    LoginCmd    `cmd:"" help:"Save API URL and token to the config file."`
 	Whoami   WhoamiCmd   `cmd:"" help:"Show which token you're authenticated as (verifies the token)."`
+	LLM      LLMCmd      `cmd:"" name:"llm" help:"Print a compact, agent-oriented guide to the CLI."`
 }
 
 // Run parses args and executes the selected command, returning the process

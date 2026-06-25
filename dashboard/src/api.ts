@@ -22,6 +22,14 @@ export interface Version {
   created_at: string;
 }
 
+export interface Asset {
+  hash: string;
+  content_type: string;
+  size_bytes: number;
+  url: string;
+  created_at: string;
+}
+
 export interface Comment {
   id: string;
   author: string;
@@ -96,7 +104,7 @@ export const api = {
     );
   },
   getArtifact: (id: string) =>
-    req<{ artifact: Artifact; versions: Version[] }>("GET", `/v1/admin/artifacts/${id}`),
+    req<{ artifact: Artifact; versions: Version[]; assets?: Asset[] }>("GET", `/v1/admin/artifacts/${id}`),
   expireArtifact: (id: string) => req<Artifact>("POST", `/v1/admin/artifacts/${id}/expire`),
   deleteArtifact: (id: string) =>
     req<{ id: string; status: string }>("DELETE", `/v1/admin/artifacts/${id}`),
