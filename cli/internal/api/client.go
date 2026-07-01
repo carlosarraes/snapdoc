@@ -50,8 +50,9 @@ type Artifact struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	CreatedAt      string `json:"created_at"`
 	ExpiresAt      string `json:"expires_at"`
-	HasPasscode    bool   `json:"has_passcode"`
-	TokenName      string `json:"token_name,omitempty"`
+	HasPasscode     bool   `json:"has_passcode"`
+	CommentsEnabled bool   `json:"comments_enabled"`
+	TokenName       string `json:"token_name,omitempty"`
 	// UnresolvedRefs is set on a multipart publish: local image refs the server
 	// could not match to an uploaded file (left as-is in the document).
 	UnresolvedRefs []string `json:"unresolved_refs,omitempty"`
@@ -76,6 +77,7 @@ type PublishOptions struct {
 	Title    string
 	TTL      string
 	Passcode string
+	Comments bool
 }
 
 // AssetFile is a local image to upload alongside a document. Ref is the verbatim
@@ -107,9 +109,19 @@ type DeleteResult struct {
 	Status string `json:"status"`
 }
 
+// Anchor locates a reader comment's highlighted span within the document.
+type Anchor struct {
+	Exact  string `json:"exact"`
+	Prefix string `json:"prefix"`
+	Suffix string `json:"suffix"`
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+}
+
 type Comment struct {
 	ID         string  `json:"id"`
 	Author     string  `json:"author"`
+	AuthorKind string  `json:"author_kind"`
 	Version    int     `json:"version"`
 	Body       string  `json:"body"`
 	CreatedAt  string  `json:"created_at"`
@@ -117,6 +129,9 @@ type Comment struct {
 	Resolved   bool    `json:"resolved"`
 	ResolvedAt *string `json:"resolved_at"`
 	ResolvedBy *string `json:"resolved_by"`
+	// Set on reader (anon) comments: the unverified email and the text anchor.
+	AuthorEmail *string `json:"author_email"`
+	Anchor      *Anchor `json:"anchor"`
 }
 
 type CommentsResult struct {
@@ -171,6 +186,9 @@ func (c *Client) publish(path string, content io.Reader, contentType string, opt
 	}
 	if opts.TTL != "" {
 		q.Set("ttl", opts.TTL)
+	}
+	if opts.Comments {
+		q.Set("comments", "1")
 	}
 	var headers map[string]string
 	if opts.Passcode != "" {
@@ -239,6 +257,9 @@ func (c *Client) publishMultipart(path string, content io.Reader, contentType st
 	}
 	if opts.TTL != "" {
 		q.Set("ttl", opts.TTL)
+	}
+	if opts.Comments {
+		q.Set("comments", "1")
 	}
 	var headers map[string]string
 	if opts.Passcode != "" {
@@ -338,6 +359,19 @@ func (c *Client) Delete(id string) (*DeleteResult, error) {
 func (c *Client) Expire(id string) (*Artifact, error) {
 	var a Artifact
 	if err := c.do("POST", "/v1/artifacts/"+url.PathEscape(id)+"/expire", nil, nil, "", &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// SetCommentsEnabled toggles the anonymous reader-comment opt-in for an artifact.
+func (c *Client) SetCommentsEnabled(id string, enabled bool) (*Artifact, error) {
+	body, err := json.Marshal(map[string]bool{"enabled": enabled})
+	if err != nil {
+		return nil, err
+	}
+	var a Artifact
+	if err := c.do("POST", "/v1/artifacts/"+url.PathEscape(id)+"/comment-settings", nil, bytes.NewReader(body), "application/json", &a); err != nil {
 		return nil, err
 	}
 	return &a, nil

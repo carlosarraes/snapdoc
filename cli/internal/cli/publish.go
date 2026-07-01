@@ -19,6 +19,7 @@ type PublishCmd struct {
 	Update     string `help:"Artifact ID to update with a new version." placeholder:"ID"`
 	Markdown   bool   `help:"Treat input as Markdown (auto-detected for .md/.markdown files)."`
 	Passcode   string `help:"Protect a new artifact with a passcode (applies only when creating)."`
+	Comments   bool   `help:"Allow anyone with the link to post line-anchored comments via the review page (cannot combine with --passcode)."`
 	NoAssets   bool   `help:"Don't auto-upload local images; publish references as-is."`
 	AssetsBase string `help:"Directory to resolve relative image paths against (default: the document's folder, or CWD for stdin)." placeholder:"DIR"`
 	Quiet      bool   `short:"q" help:"Print only the artifact URL."`
@@ -38,7 +39,7 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 	if err != nil {
 		return err
 	}
-	opts := api.PublishOptions{Title: p.Title, TTL: p.TTL}
+	opts := api.PublishOptions{Title: p.Title, TTL: p.TTL, Comments: p.Comments}
 
 	var assets []api.AssetFile
 	if !p.NoAssets {

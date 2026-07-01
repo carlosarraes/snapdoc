@@ -47,6 +47,14 @@ INSPECT
   snapdoc get <id>                    # metadata, versions, and hosted images
   snapdoc comments <id> -s open       # read reviewer feedback before iterating
 
+COLLECT FEEDBACK (anyone with the link, no account)
+  snapdoc publish report.md --comments   # opt in at publish, or later:
+  snapdoc comments enable <id>           # prints a /review/<id> link to share
+  snapdoc comments disable <id>
+  Reviewers highlight text on the review page and comment on the exact span.
+  Read it back with the quoted context to drive the next version — reader lines
+  show "(reader)" and the quote. Reader comments and --passcode are exclusive.
+
 LIFECYCLE
   snapdoc expire <id>     # make it unavailable now
   snapdoc delete <id>     # remove it and its hosted images
