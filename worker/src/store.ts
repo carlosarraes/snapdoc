@@ -16,6 +16,7 @@ export interface Artifact {
   tokenId: string;
   tokenName?: string;
   hasPasscode: boolean;
+  commentsEnabled: boolean;
 }
 
 export interface ArtifactVersion {
@@ -40,6 +41,17 @@ export interface StoredAsset {
   createdAt: string;
 }
 
+// A text-anchor: a highlighted span located by its quoted text plus surrounding
+// context (W3C-style TextQuote + TextPosition selectors). Reader comments carry
+// one; team/Access comments do not (anchor === null).
+export interface Anchor {
+  exact: string;
+  prefix: string;
+  suffix: string;
+  start: number;
+  end: number;
+}
+
 export interface Comment {
   id: string;
   artifactId: string;
@@ -50,6 +62,11 @@ export interface Comment {
   parentId: string | null;
   resolvedAt: string | null;
   resolvedBy: string | null;
+  authorKind: "access" | "anon";
+  authorEmail: string | null;
+  anchor: Anchor | null;
+  // Opaque self-delete capability for anonymous authors; never serialized.
+  viewerId: string | null;
 }
 
 export interface TokenRecord {
@@ -176,6 +193,7 @@ interface ArtifactRow {
   content_type: string;
   size_bytes: number;
   has_passcode: number;
+  comments_enabled: number;
 }
 
 function rowToArtifact(row: ArtifactRow): Artifact {
@@ -190,6 +208,7 @@ function rowToArtifact(row: ArtifactRow): Artifact {
     expiresAt: row.expires_at,
     tokenId: row.token_id,
     hasPasscode: !!row.has_passcode,
+    commentsEnabled: !!row.comments_enabled,
   };
   if (row.token_name !== undefined) artifact.tokenName = row.token_name;
   return artifact;
@@ -205,11 +224,31 @@ interface CommentRow {
   parent_id: string | null;
   resolved_at: string | null;
   resolved_by: string | null;
+  author_kind: string;
+  author_email: string | null;
+  viewer_id: string | null;
+  anchor_exact: string | null;
+  anchor_prefix: string | null;
+  anchor_suffix: string | null;
+  anchor_start: number | null;
+  anchor_end: number | null;
 }
 
-const COMMENT_COLUMNS = "id, artifact_id, version, author, body, created_at, parent_id, resolved_at, resolved_by";
+const COMMENT_COLUMNS =
+  "id, artifact_id, version, author, body, created_at, parent_id, resolved_at, resolved_by, " +
+  "author_kind, author_email, viewer_id, anchor_exact, anchor_prefix, anchor_suffix, anchor_start, anchor_end";
 
 function rowToComment(r: CommentRow): Comment {
+  const anchor: Anchor | null =
+    r.anchor_exact !== null && r.anchor_start !== null && r.anchor_end !== null
+      ? {
+          exact: r.anchor_exact,
+          prefix: r.anchor_prefix ?? "",
+          suffix: r.anchor_suffix ?? "",
+          start: r.anchor_start,
+          end: r.anchor_end,
+        }
+      : null;
   return {
     id: r.id,
     artifactId: r.artifact_id,
@@ -220,6 +259,10 @@ function rowToComment(r: CommentRow): Comment {
     parentId: r.parent_id,
     resolvedAt: r.resolved_at,
     resolvedBy: r.resolved_by,
+    authorKind: r.author_kind === "anon" ? "anon" : "access",
+    authorEmail: r.author_email,
+    anchor,
+    viewerId: r.viewer_id,
   };
 }
 
@@ -254,6 +297,7 @@ const ARTIFACT_SELECT = `
   SELECT a.id, a.title, a.status, a.token_id, a.current_version, a.created_at, a.expires_at,
          CASE WHEN a.status = 'active' AND a.expires_at <= ?1 THEN 'expired' ELSE a.status END AS effective_status,
          (a.passcode_hash IS NOT NULL) AS has_passcode,
+         a.comments_enabled,
          v.content_type, v.size_bytes,
          t.name AS token_name
   FROM artifacts a
@@ -328,9 +372,13 @@ export class Store {
     contentType: string;
     body: string;
     passcode?: string;
+    commentsEnabled?: boolean;
     assets?: UploadAsset[];
     artifactHost?: string;
   }): Promise<Artifact & { unresolvedRefs?: string[] }> {
+    if (input.commentsEnabled && input.passcode) {
+      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
+    }
     const id = randomId(ARTIFACT_ID_LENGTH);
     const now = new Date();
     const createdAt = isoNow(now);
@@ -348,8 +396,8 @@ export class Store {
     await this.blobs.put(r2Key(id, 1), prepared.body, { httpMetadata: { contentType: input.contentType } });
     await this.db.batch([
       this.db
-        .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7)")
-        .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt),
+        .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt, comments_enabled) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7, ?8)")
+        .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt, input.commentsEnabled ? 1 : 0),
       this.db
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)")
         .bind(id, r2Key(id, 1), input.contentType, prepared.sizeBytes, createdAt),
@@ -427,17 +475,23 @@ export class Store {
 
   // Lightweight routing check for the serving layer: effective status + whether
   // a passcode gate applies, without reading the blob.
-  async getArtifactGate(id: string): Promise<{ status: ArtifactStatus; hasPasscode: boolean } | null> {
+  async getArtifactGate(
+    id: string,
+  ): Promise<{ status: ArtifactStatus; hasPasscode: boolean; commentsEnabled: boolean } | null> {
     const row = await this.db
       .prepare(
         `SELECT CASE WHEN status = 'active' AND expires_at <= ?1 THEN 'expired' ELSE status END AS effective_status,
-                passcode_hash
+                passcode_hash, comments_enabled
          FROM artifacts WHERE id = ?2`,
       )
       .bind(isoNow(), id)
-      .first<{ effective_status: string; passcode_hash: string | null }>();
+      .first<{ effective_status: string; passcode_hash: string | null; comments_enabled: number }>();
     if (!row) return null;
-    return { status: row.effective_status as ArtifactStatus, hasPasscode: row.passcode_hash !== null };
+    return {
+      status: row.effective_status as ArtifactStatus,
+      hasPasscode: row.passcode_hash !== null,
+      commentsEnabled: !!row.comments_enabled,
+    };
   }
 
   async verifyPasscode(id: string, passcode: string): Promise<boolean> {
@@ -477,6 +531,7 @@ export class Store {
       defaultTtlSeconds: number;
       contentType: string;
       body: string;
+      commentsEnabled?: boolean;
       assets?: UploadAsset[];
       artifactHost?: string;
     },
@@ -484,6 +539,13 @@ export class Store {
     const current = await this.fetchArtifact(id);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+
+    // A new version may flip the comment opt-in; unspecified keeps the current
+    // setting. Reader comments and a passcode remain mutually exclusive.
+    const commentsEnabled = input.commentsEnabled ?? current.commentsEnabled;
+    if (commentsEnabled && current.hasPasscode) {
+      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
+    }
 
     const now = new Date();
     const createdAt = isoNow(now);
@@ -506,8 +568,8 @@ export class Store {
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
         .bind(id, version, r2Key(id, version), input.contentType, prepared.sizeBytes, createdAt),
       this.db
-        .prepare("UPDATE artifacts SET status = 'active', current_version = ?1, expires_at = ?2, title = ?3, blobs_purged_at = NULL WHERE id = ?4")
-        .bind(version, expiresAt, title, id),
+        .prepare("UPDATE artifacts SET status = 'active', current_version = ?1, expires_at = ?2, title = ?3, comments_enabled = ?4, blobs_purged_at = NULL WHERE id = ?5")
+        .bind(version, expiresAt, title, commentsEnabled ? 1 : 0, id),
       ...prepared.assetStatements,
     ]);
     const artifact = (await this.fetchArtifact(id))!;
@@ -585,6 +647,20 @@ export class Store {
     return (await this.fetchArtifact(id))!;
   }
 
+  // Owner opt-in toggle for the anonymous reader-comment path. Enabling is
+  // refused on a passcode-protected artifact (the review page's sandboxed iframe
+  // cannot complete the unlock flow, so the two features are mutually exclusive).
+  async setCommentsEnabled(id: string, enabled: boolean): Promise<Artifact> {
+    const current = await this.fetchArtifact(id);
+    if (!current) throw new StoreError("not_found", "Artifact not found.");
+    if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    if (enabled && current.hasPasscode) {
+      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
+    }
+    await this.db.prepare("UPDATE artifacts SET comments_enabled = ?1 WHERE id = ?2").bind(enabled ? 1 : 0, id).run();
+    return (await this.fetchArtifact(id))!;
+  }
+
   async deleteArtifact(id: string): Promise<{ id: string; status: "deleted" }> {
     const current = await this.fetchArtifact(id);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
@@ -613,22 +689,40 @@ export class Store {
     return { state: "active", html: await object.text(), contentType: row.content_type, version: v };
   }
 
-  // ---- comments (doc-level threads; authored by team via Access, read by agents) ----
+  // ---- comments ----
+  // Two channels share this table: team threads authored via Access (author_kind
+  // 'access', read by agents) and reader threads authored anonymously through the
+  // public review page (author_kind 'anon', text-anchored). A reply always
+  // matches its root's kind, so the channels never interleave.
 
   async addComment(
     artifactId: string,
-    input: { author: string; body: string; parentId?: string | null },
+    input: {
+      author: string;
+      authorKind?: "access" | "anon";
+      authorEmail?: string | null;
+      body: string;
+      parentId?: string | null;
+      anchor?: Anchor | null;
+      viewerId?: string | null;
+    },
   ): Promise<Comment> {
     const current = await this.fetchArtifact(artifactId);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    const authorKind = input.authorKind ?? "access";
+    const authorEmail = input.authorEmail ?? null;
+    const anchor = input.anchor ?? null;
+    const viewerId = input.viewerId ?? null;
     let parentId: string | null = null;
     if (input.parentId) {
       const parent = await this.db
-        .prepare("SELECT id, artifact_id, parent_id FROM comments WHERE id = ?1 AND deleted_at IS NULL")
+        .prepare("SELECT id, artifact_id, parent_id, author_kind FROM comments WHERE id = ?1 AND deleted_at IS NULL")
         .bind(input.parentId)
-        .first<{ id: string; artifact_id: string; parent_id: string | null }>();
-      if (!parent || parent.artifact_id !== artifactId) {
+        .first<{ id: string; artifact_id: string; parent_id: string | null; author_kind: string }>();
+      // Same message for a missing parent and a cross-kind one, so a reader
+      // client can neither reach nor probe for team threads.
+      if (!parent || parent.artifact_id !== artifactId || parent.author_kind !== authorKind) {
         throw new StoreError("invalid_request", "Parent comment not found on this artifact.");
       }
       // Re-root: a reply always hangs off the thread root, never another reply.
@@ -638,10 +732,26 @@ export class Store {
     const createdAt = isoNow();
     const version = current.currentVersion;
     await this.db
-      .prepare("INSERT INTO comments (id, artifact_id, version, author, body, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
-      .bind(id, artifactId, version, input.author, input.body, createdAt, parentId)
+      .prepare(
+        `INSERT INTO comments
+           (id, artifact_id, version, author, body, created_at, parent_id,
+            author_kind, author_email, viewer_id,
+            anchor_exact, anchor_prefix, anchor_suffix, anchor_start, anchor_end)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+      )
+      .bind(
+        id, artifactId, version, input.author, input.body, createdAt, parentId,
+        authorKind, authorEmail, viewerId,
+        anchor?.exact ?? null, anchor?.prefix ?? null, anchor?.suffix ?? null,
+        anchor?.start ?? null, anchor?.end ?? null,
+      )
       .run();
-    return { id, artifactId, version, author: input.author, body: input.body, createdAt, parentId, resolvedAt: null, resolvedBy: null };
+    return {
+      id, artifactId, version,
+      author: input.author, body: input.body, createdAt, parentId,
+      resolvedAt: null, resolvedBy: null,
+      authorKind, authorEmail, anchor, viewerId,
+    };
   }
 
   async listComments(
@@ -659,6 +769,47 @@ export class Store {
     const truncated = results.length > COMMENTS_LIMIT;
     const page = (truncated ? results.slice(0, COMMENTS_LIMIT) : results).map(rowToComment);
     return { comments: orderThreads(page, status), truncated };
+  }
+
+  // Public-rail read: anonymous (reader) comments only, so team/Access threads
+  // are never exposed to anyone-with-the-link.
+  async listReaderComments(
+    artifactId: string,
+    status: "open" | "resolved" | "all" = "all",
+  ): Promise<{ comments: Comment[]; truncated: boolean }> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT ${COMMENT_COLUMNS} FROM comments
+         WHERE artifact_id = ?1 AND author_kind = 'anon' AND deleted_at IS NULL
+         ORDER BY created_at ASC, rowid ASC LIMIT ?2`,
+      )
+      .bind(artifactId, COMMENTS_LIMIT + 1)
+      .all<CommentRow>();
+    const truncated = results.length > COMMENTS_LIMIT;
+    const page = (truncated ? results.slice(0, COMMENTS_LIMIT) : results).map(rowToComment);
+    return { comments: orderThreads(page, status), truncated };
+  }
+
+  // Session self-delete for a reader: only the anon author (proven by the
+  // viewer_id from their cookie) may remove their own comment. Cascades to
+  // replies like a team root delete. Any mismatch reads as "not found".
+  async deleteReaderComment(commentId: string, viewerId: string): Promise<{ id: string; deletedAt: string } | null> {
+    const row = await this.db
+      .prepare("SELECT id, parent_id, deleted_at, viewer_id FROM comments WHERE id = ?1 AND author_kind = 'anon'")
+      .bind(commentId)
+      .first<{ id: string; parent_id: string | null; deleted_at: string | null; viewer_id: string | null }>();
+    if (!row || row.viewer_id === null || !constantTimeEqual(row.viewer_id, viewerId)) return null;
+    if (row.deleted_at) return { id: row.id, deletedAt: row.deleted_at };
+    const deletedAt = isoNow();
+    if (row.parent_id === null) {
+      await this.db
+        .prepare("UPDATE comments SET deleted_at = ?1 WHERE (id = ?2 OR parent_id = ?2) AND deleted_at IS NULL")
+        .bind(deletedAt, commentId)
+        .run();
+    } else {
+      await this.db.prepare("UPDATE comments SET deleted_at = ?1 WHERE id = ?2").bind(deletedAt, commentId).run();
+    }
+    return { id: commentId, deletedAt };
   }
 
   async deleteComment(commentId: string): Promise<{ id: string; deletedAt: string } | null> {
@@ -723,6 +874,46 @@ export class Store {
     return { allowed: false, retryAfterSeconds };
   }
 
+  async recordCommentEvent(ipHash: string, artifactId: string): Promise<void> {
+    await this.db
+      .prepare("INSERT INTO comment_events (ip_hash, artifact_id, created_at) VALUES (?1, ?2, ?3)")
+      .bind(ipHash, artifactId, isoNow())
+      .run();
+  }
+
+  // Two independent sliding-hour windows guard the anonymous write path: a
+  // per-IP cap (throttles one abuser) and a per-artifact cap (backstops IP
+  // rotation on a single leaked link). Mirrors checkRateLimit's shape.
+  async checkCommentRateLimit(
+    ipHash: string,
+    artifactId: string,
+    perIp: number,
+    perArtifact: number,
+  ): Promise<{ allowed: boolean; retryAfterSeconds: number; scope?: "ip" | "artifact" }> {
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - 3600_000).toISOString();
+    const retryAfter = (oldestIso: string): number =>
+      Math.max(1, Math.ceil((new Date(oldestIso).getTime() + 3600_000 - now.getTime()) / 1000));
+
+    const ip = await this.db
+      .prepare("SELECT created_at FROM comment_events WHERE ip_hash = ?1 AND created_at > ?2 ORDER BY created_at ASC")
+      .bind(ipHash, windowStart)
+      .all<{ created_at: string }>();
+    if (ip.results.length >= perIp) {
+      return { allowed: false, retryAfterSeconds: retryAfter(ip.results[0].created_at), scope: "ip" };
+    }
+
+    const artifact = await this.db
+      .prepare("SELECT created_at FROM comment_events WHERE artifact_id = ?1 AND created_at > ?2 ORDER BY created_at ASC")
+      .bind(artifactId, windowStart)
+      .all<{ created_at: string }>();
+    if (artifact.results.length >= perArtifact) {
+      return { allowed: false, retryAfterSeconds: retryAfter(artifact.results[0].created_at), scope: "artifact" };
+    }
+
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
   // ---- scheduled cleanup ----
 
   async cleanupExpired(now = new Date()): Promise<{ markedExpired: number; blobsPurged: number }> {
@@ -746,11 +937,10 @@ export class Store {
       await this.db.prepare("UPDATE artifacts SET blobs_purged_at = ?1 WHERE id = ?2").bind(nowIso, row.id).run();
     }
 
-    // Drop publish events older than the rate-limit window.
-    await this.db
-      .prepare("DELETE FROM publish_events WHERE created_at <= ?1")
-      .bind(new Date(now.getTime() - 3600_000).toISOString())
-      .run();
+    // Drop rate-limit events older than the sliding one-hour window.
+    const rateLimitCutoff = new Date(now.getTime() - 3600_000).toISOString();
+    await this.db.prepare("DELETE FROM publish_events WHERE created_at <= ?1").bind(rateLimitCutoff).run();
+    await this.db.prepare("DELETE FROM comment_events WHERE created_at <= ?1").bind(rateLimitCutoff).run();
 
     return { markedExpired: marked.meta.changes ?? 0, blobsPurged: results.length };
   }

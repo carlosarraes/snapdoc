@@ -38,4 +38,20 @@ describe("scheduled cleanup", () => {
     expect(await env.BLOBS.get(`artifacts/${pastExpiry.id}/v1`)).not.toBeNull();
     expect(await env.BLOBS.get(`artifacts/${live.id}/v1`)).not.toBeNull();
   });
+
+  it("trims comment_events older than the rate-limit window, keeping recent ones", async () => {
+    const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    await env.DB.prepare("INSERT INTO comment_events (ip_hash, artifact_id, created_at) VALUES (?1, ?2, ?3)")
+      .bind("ip-old", "art", old)
+      .run();
+    await env.DB.prepare("INSERT INTO comment_events (ip_hash, artifact_id, created_at) VALUES (?1, ?2, ?3)")
+      .bind("ip-new", "art", recent)
+      .run();
+
+    await runScheduled();
+
+    const { results } = await env.DB.prepare("SELECT ip_hash FROM comment_events").all<{ ip_hash: string }>();
+    expect(results.map((r) => r.ip_hash)).toEqual(["ip-new"]);
+  });
 });

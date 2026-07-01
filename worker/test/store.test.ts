@@ -458,3 +458,88 @@ describe("comment threads and resolution", () => {
     expect(list.comments).toHaveLength(0);
   });
 });
+
+describe("reader comments (store)", () => {
+  const ANCHOR = { exact: "metric", prefix: "the ", suffix: " here", start: 4, end: 10 };
+
+  it("toggles comments_enabled and refuses it alongside a passcode", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    expect(art.commentsEnabled).toBe(false);
+
+    const on = await store.setCommentsEnabled(art.id, true);
+    expect(on.commentsEnabled).toBe(true);
+    expect((await store.getArtifactGate(art.id))?.commentsEnabled).toBe(true);
+
+    const locked = await store.createArtifact({
+      tokenId: tok.id, title: null, ttlSeconds: DAY, contentType: "text/html", body: HTML, passcode: "s3cret",
+    });
+    await expect(store.setCommentsEnabled(locked.id, true)).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("stores and round-trips a reader anchor; team comments have none", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+
+    const reader = await store.addComment(art.id, {
+      author: "Alex", authorKind: "anon", authorEmail: "a@x.com", body: "stale", anchor: ANCHOR, viewerId: "rvw_x",
+    });
+    expect(reader.authorKind).toBe("anon");
+    expect(reader.anchor).toEqual(ANCHOR);
+
+    const team = await store.addComment(art.id, { author: "lead@t.com", body: "team" });
+    expect(team.authorKind).toBe("access");
+    expect(team.anchor).toBeNull();
+
+    const readerOnly = await store.listReaderComments(art.id);
+    expect(readerOnly.comments.map((c) => c.body)).toEqual(["stale"]);
+    expect((await store.listComments(art.id)).comments).toHaveLength(2);
+  });
+
+  it("self-delete only succeeds for the matching viewer_id", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const c = await store.addComment(art.id, {
+      author: "A", authorKind: "anon", body: "x", anchor: ANCHOR, viewerId: "rvw_owner",
+    });
+
+    expect(await store.deleteReaderComment(c.id, "rvw_other")).toBeNull();
+    const ok = await store.deleteReaderComment(c.id, "rvw_owner");
+    expect(ok?.id).toBe(c.id);
+    expect((await store.listReaderComments(art.id)).comments).toHaveLength(0);
+  });
+
+  it("refuses an anon reply onto a team root", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    const team = await store.addComment(art.id, { author: "lead@t.com", body: "team root" });
+    await expect(
+      store.addComment(art.id, { author: "R", authorKind: "anon", body: "reply", parentId: team.id }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("enforces per-IP and per-artifact comment windows with a retry hint", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+
+    await store.recordCommentEvent("ipA", art.id);
+    await store.recordCommentEvent("ipA", art.id);
+
+    const ipHit = await store.checkCommentRateLimit("ipA", art.id, 2, 100);
+    expect(ipHit.allowed).toBe(false);
+    expect(ipHit.scope).toBe("ip");
+    expect(ipHit.retryAfterSeconds).toBeGreaterThan(0);
+
+    // A different IP is still under the per-IP cap...
+    expect((await store.checkCommentRateLimit("ipB", art.id, 2, 100)).allowed).toBe(true);
+    // ...but the per-artifact cap backstops it once the artifact window fills.
+    const artHit = await store.checkCommentRateLimit("ipB", art.id, 5, 2);
+    expect(artHit.allowed).toBe(false);
+    expect(artHit.scope).toBe("artifact");
+  });
+});

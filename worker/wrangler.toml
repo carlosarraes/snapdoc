@@ -36,12 +36,16 @@ DEFAULT_TTL = "14d"
 MAX_TTL = "90d"
 MIN_TTL = "1h"
 RATE_LIMIT_PER_HOUR = "100"
+COMMENT_RATE_LIMIT_PER_IP_PER_HOUR = "20"
+COMMENT_RATE_LIMIT_PER_ARTIFACT_PER_HOUR = "200"
 
 # Secrets (set via `wrangler secret put`):
 # ADMIN_BOOTSTRAP — mints the first API token
 # CF_ACCESS_AUD / CF_ACCESS_TEAM_DOMAIN — Access JWT verification (BOTH are
 #   required in production; the admin API fails closed with 503 "misconfigured"
 #   when either is missing)
+# COMMENT_IP_SALT — salts the SHA-256 of reader IPs stored in comment_events
+#   (defense-in-depth; falls back to an unsalted hash when unset)
 #
 # Local development: create a .dev.vars file (gitignored) containing
 #   ENVIRONMENT="dev"

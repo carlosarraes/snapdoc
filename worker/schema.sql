@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   expires_at TEXT NOT NULL,
   blobs_purged_at TEXT,
   passcode_hash TEXT,
-  passcode_salt TEXT
+  passcode_salt TEXT,
+  comments_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS versions (
@@ -57,10 +58,30 @@ CREATE TABLE IF NOT EXISTS comments (
   deleted_at TEXT,
   parent_id TEXT REFERENCES comments(id),
   resolved_at TEXT,
-  resolved_by TEXT
+  resolved_by TEXT,
+  author_kind TEXT NOT NULL DEFAULT 'access' CHECK (author_kind IN ('access', 'anon')),
+  author_email TEXT,
+  viewer_id TEXT,
+  anchor_exact TEXT,
+  anchor_prefix TEXT,
+  anchor_suffix TEXT,
+  anchor_start INTEGER,
+  anchor_end INTEGER
+);
+
+-- Reader (anonymous) comment write throttle: sliding window keyed by hashed IP
+-- and by artifact. ip_hash = SHA-256(ip + COMMENT_IP_SALT).
+CREATE TABLE IF NOT EXISTS comment_events (
+  ip_hash TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_artifact ON comments(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_comments_artifact_kind ON comments(artifact_id, author_kind, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_comment_events_ip_time ON comment_events(ip_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_comment_events_artifact_time ON comment_events(artifact_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_publish_events_token_time ON publish_events(token_id, created_at);
 
