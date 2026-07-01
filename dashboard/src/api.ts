@@ -12,6 +12,7 @@ export interface Artifact {
   created_at: string;
   expires_at: string;
   has_passcode: boolean;
+  comments_enabled: boolean;
   token_name?: string | null;
 }
 
@@ -30,9 +31,18 @@ export interface Asset {
   created_at: string;
 }
 
+export interface Anchor {
+  exact: string;
+  prefix: string;
+  suffix: string;
+  start: number;
+  end: number;
+}
+
 export interface Comment {
   id: string;
   author: string;
+  author_kind: "access" | "anon";
   version: number;
   body: string;
   created_at: string;
@@ -40,6 +50,8 @@ export interface Comment {
   resolved: boolean;
   resolved_at: string | null;
   resolved_by: string | null;
+  author_email?: string | null;
+  anchor?: Anchor | null;
 }
 
 export interface TokenInfo {
@@ -108,6 +120,8 @@ export const api = {
   expireArtifact: (id: string) => req<Artifact>("POST", `/v1/admin/artifacts/${id}/expire`),
   deleteArtifact: (id: string) =>
     req<{ id: string; status: string }>("DELETE", `/v1/admin/artifacts/${id}`),
+  setCommentsEnabled: (id: string, enabled: boolean) =>
+    req<Artifact>("POST", `/v1/admin/artifacts/${id}/comment-settings`, { enabled }),
 
   listComments: (id: string, status?: string) =>
     req<{ artifact_id: string; comments: Comment[]; truncated?: boolean }>(

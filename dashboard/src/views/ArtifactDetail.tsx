@@ -102,7 +102,18 @@ export function ArtifactDetail() {
     }
   }
 
+  async function toggleComments(enabled: boolean) {
+    setActionError("");
+    try {
+      await api.setCommentsEnabled(id, enabled);
+      meta.reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const a = meta.data?.artifact;
+  const reviewUrl = `${location.origin}/review/${id}`;
 
   const roots = comments.filter((c) => c.parent_id === null);
   const repliesByRoot = new Map<string, Comment[]>();
@@ -140,6 +151,11 @@ export function ArtifactDetail() {
                 expire
               </button>
             )}
+            {a.status === "active" && !a.has_passcode && (
+              <button className="btn" onClick={() => toggleComments(!a.comments_enabled)}>
+                {a.comments_enabled ? "disable comments" : "enable comments"}
+              </button>
+            )}
             {a.status !== "deleted" && (
               <button className="btn btn-danger" onClick={remove}>
                 delete
@@ -162,6 +178,19 @@ export function ArtifactDetail() {
               <dd>{formatBytes(a.size_bytes)}</dd>
               <dt>token</dt>
               <dd>{a.token_name ?? "—"}</dd>
+              <dt>comments</dt>
+              <dd>
+                {a.comments_enabled ? (
+                  <>
+                    <span className="badge active">on</span>{" "}
+                    <a href={reviewUrl} target="_blank" rel="noreferrer">
+                      review ↗
+                    </a>
+                  </>
+                ) : (
+                  <span className="muted">off</span>
+                )}
+              </dd>
               <dt>created</dt>
               <dd>{formatDate(a.created_at)}</dd>
               <dt>expires</dt>
@@ -253,6 +282,8 @@ export function ArtifactDetail() {
           <div className={`comment${c.resolved ? " resolved" : ""}`} key={c.id}>
             <div className="head">
               <span className="author">{c.author}</span>
+              {c.author_kind === "anon" && <span className="badge reader">reader</span>}
+              {c.author_email && <span className="muted">({c.author_email})</span>}
               <span>· v{c.version}</span>
               <span>
                 · <RelativeTime iso={c.created_at} />
@@ -274,12 +305,15 @@ export function ArtifactDetail() {
                 delete
               </button>
             </div>
+            {c.anchor && <blockquote className="quote">{c.anchor.exact}</blockquote>}
             <div className="body">{c.body}</div>
 
             {replies.map((r) => (
               <div className="comment reply" key={r.id}>
                 <div className="head">
                   <span className="author">{r.author}</span>
+                  {r.author_kind === "anon" && <span className="badge reader">reader</span>}
+                  {r.author_email && <span className="muted">({r.author_email})</span>}
                   <span>· v{r.version}</span>
                   <span>
                     · <RelativeTime iso={r.created_at} />
