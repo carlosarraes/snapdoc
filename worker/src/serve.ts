@@ -51,18 +51,20 @@ const ASSET_HEADERS: Record<string, string> = {
 };
 
 // Annotate-mode CSP: ARTIFACT_CSP with exactly two relaxations, so the review
-// page (and only it) may frame the doc and the first-party annotator script may
-// load. connect-src stays unset, so the doc itself still cannot reach the
-// network even here.
+// page may frame the doc and the first-party annotator script may load.
+// connect-src stays unset, so the doc itself still cannot reach the network even
+// here. The annotator loads same-origin ('self') — ASSETS serves it on either
+// host. frame-ancestors allows 'self' (covers wrangler dev, where the review
+// page shares the doc's origin) plus the API host (the prod review page).
 function annotateCsp(apiHost: string): string {
   return [
     "default-src 'none'",
-    `script-src 'unsafe-inline' https://${apiHost}`,
+    "script-src 'unsafe-inline' 'self'",
     "style-src 'unsafe-inline'",
     "img-src https: data: blob:",
     "font-src https: data:",
     "media-src https: data: blob:",
-    `frame-ancestors https://${apiHost}`,
+    `frame-ancestors 'self' https://${apiHost}`,
     "form-action 'none'",
     "base-uri 'none'",
   ].join("; ");
@@ -70,9 +72,10 @@ function annotateCsp(apiHost: string): string {
 
 // Appends the review annotator to a document served in annotate mode. Mirrors
 // the HTMLRewriter streaming pattern in assets.ts; falls back to document end
-// for raw-HTML artifacts that have no <body>.
-async function injectAnnotator(html: string, apiHost: string): Promise<string> {
-  const tag = `<script src="https://${apiHost}/review/annotator.js" defer></script>`;
+// for raw-HTML artifacts that have no <body>. The src is relative so it loads
+// from whichever host is serving the doc (ASSETS answers on both).
+async function injectAnnotator(html: string): Promise<string> {
+  const tag = `<script src="/review/annotator.js" defer></script>`;
   let bodySeen = false;
   const rewriter = new HTMLRewriter()
     .on("body", {
@@ -336,7 +339,7 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
   // the CSP just enough to be framed by, and load its script from, the API host.
   // Only honored when the owner opted in; the bare /:id stays pristine.
   if (url.searchParams.get("annotate") === "1" && gate.commentsEnabled) {
-    const body = request.method === "HEAD" ? null : await injectAnnotator(content.html, env.API_HOST);
+    const body = request.method === "HEAD" ? null : await injectAnnotator(content.html);
     return new Response(body, {
       status: 200,
       headers: {

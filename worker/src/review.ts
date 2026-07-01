@@ -31,10 +31,12 @@ export async function serveReviewPage(c: Context<{ Bindings: Env }>): Promise<Re
   // files, not pages — let the ASSETS binding resolve them.
   if (!id || !ARTIFACT_ID.test(id)) return c.env.ASSETS.fetch(c.req.raw);
 
-  // Prod: review page on the API host, doc on the (cross-origin) artifact host.
-  // Dev: wrangler serves both hosts from localhost, so frame same-origin.
+  // Prod: review page on the API host, doc on the (cross-origin) artifact host, so
+  // inject its absolute origin. Dev: wrangler serves both from localhost (and its
+  // proxy mangles the request's port), so emit nothing — the rail falls back to
+  // its own location.origin, which is same-origin as the doc there.
   const url = new URL(c.req.url);
-  const artifactOrigin = url.hostname === c.env.API_HOST ? `https://${c.env.ARTIFACT_HOST}` : url.origin;
+  const artifactOrigin = url.hostname === c.env.API_HOST ? `https://${c.env.ARTIFACT_HOST}` : "";
 
   const html = `<!doctype html>
 <html lang="en">
@@ -43,6 +45,7 @@ export async function serveReviewPage(c: Context<{ Bindings: Env }>): Promise<Re
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Review — snapdoc</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="stylesheet" href="/review/app.css">
 </head>
 <body>

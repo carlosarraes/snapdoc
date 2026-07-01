@@ -20,6 +20,18 @@ describe("review page", () => {
     expect(html).toContain('data-artifact-origin="https://snapdoc.carraes.dev"');
   });
 
+  it("declares the snapdoc logo as its favicon", async () => {
+    const res = await SELF.fetch(`${API_BASE}/review/AAAAAAAAAAAAAA`);
+    const html = await res.text();
+    // The API host has no /favicon.ico fallback (unlike the artifact host), so
+    // the shell must declare the icon itself or the browser tab shows none.
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/logo.svg">');
+
+    // ...and the referenced asset must actually resolve on this host.
+    const logo = await SELF.fetch(`${API_BASE}/logo.svg`);
+    expect(logo.status).toBe(200);
+  });
+
   it("is public — renders with no Access JWT at all", async () => {
     const res = await SELF.fetch(`${API_BASE}/review/BBBBBBBBBBBBBB`);
     expect(res.status).toBe(200);

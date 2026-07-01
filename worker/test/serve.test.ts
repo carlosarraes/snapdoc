@@ -106,8 +106,8 @@ describe("annotate mode", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("/review/annotator.js");
     const csp = res.headers.get("Content-Security-Policy")!;
-    expect(csp).toContain("frame-ancestors https://api.snapdoc.carraes.dev");
-    expect(csp).toContain("script-src 'unsafe-inline' https://api.snapdoc.carraes.dev");
+    expect(csp).toContain("frame-ancestors 'self' https://api.snapdoc.carraes.dev");
+    expect(csp).toContain("script-src 'unsafe-inline' 'self'");
     // connect-src stays unset, so the doc still cannot reach the network.
     expect(csp).not.toContain("connect-src");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
