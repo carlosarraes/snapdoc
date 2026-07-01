@@ -190,8 +190,8 @@ Refines the v1 "self-contained, no separate asset uploads" stance for the common
 - Multi-file site hosting or directory deploys.
 - Standalone asset upload / general media library (referenced-image bundling exists — see Image Hosting).
 - Visual HTML editing.
-- Inline comments.
-- Agent-readable comment resolution.
+- ~~Inline comments.~~ Delivered: reader comments anchor to a text selection via a public review page (owner opt-in per artifact).
+- ~~Agent-readable comment resolution.~~ Delivered: `snapdoc comments <id>` surfaces reader feedback with its quoted context for the next iteration.
 - Company SSO or Google/Microsoft Workspace authentication for artifact viewing.
 - Public discovery, sitemap publishing, or SEO-oriented hosting.
 - Billing implementation.

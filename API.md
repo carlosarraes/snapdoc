@@ -54,11 +54,12 @@ Stable error codes (clients must switch on `code`, never on `message`):
 | 401 | `unauthorized` | Missing/invalid/revoked token or Access JWT |
 | 401 | `passcode_required` | Content read of a passcode-protected artifact without `X-Snapdoc-Passcode` |
 | 401 | `passcode_incorrect` | Wrong passcode for a protected artifact |
+| 403 | `comments_disabled` | Reader comment on an artifact whose owner has not enabled comments |
 | 404 | `not_found` | Unknown artifact/version/token id |
 | 409 | `not_active` | Update/expire on a deleted artifact |
 | 410 | `gone` | Content read of an expired or deleted artifact |
 | 413 | `too_large` | Document exceeds 2 MB, an image exceeds 5 MB, or the bundle exceeds 25 MB |
-| 429 | `rate_limited` | Over 100 publishes/hr; honors `Retry-After` header (seconds) |
+| 429 | `rate_limited` | Over 100 publishes/hr, or reader comments over the per-IP/per-artifact cap; honors `Retry-After` |
 | 500 | `internal` | Unexpected server error |
 | 503 | `misconfigured` | Admin auth misconfigured server-side (e.g. Access env vars missing in production); admin routes fail closed |
 
@@ -76,12 +77,15 @@ Stable error codes (clients must switch on `code`, never on `message`):
   "created_at": "2026-06-12T15:04:05Z",
   "expires_at": "2026-06-26T15:04:05Z",
   "has_passcode": false,
+  "comments_enabled": false,
   "token_name": "carraes-laptop"
 }
 ```
 
 `status` ∈ `active | expired | deleted`. `has_passcode` is true when the artifact
-is passcode-protected. `token_name` appears only in admin responses.
+is passcode-protected. `comments_enabled` is true when the owner has opted the
+artifact into public reader comments (see the review page below); it is mutually
+exclusive with `has_passcode`. `token_name` appears only in admin responses.
 
 ## Publisher endpoints (Bearer token)
 
@@ -107,6 +111,8 @@ is passcode-protected. `token_name` appears only in admin responses.
 - Query params:
   - `title` (optional, ≤200 chars)
   - `ttl` (optional, duration string: `12h`, `7d`, `90d`; default `14d`)
+  - `comments` (optional, `0` or `1`) — opt the artifact into public reader
+    comments. `invalid_request` if combined with `X-Snapdoc-Passcode`.
 - Headers:
   - `X-Snapdoc-Passcode` (optional) — protects the new artifact with a passcode.
     Sent as a header rather than a query param so it is not logged. Hashed with
@@ -188,7 +194,9 @@ so shared across versions). It is `[]` when the artifact has no images.
 ### GET /v1/artifacts/{id}/comments — read comments (the agent loop)
 
 - Token-gated (any valid team token). Returns non-deleted comments in
-  **thread order**: each root is followed by its replies, oldest-first.
+  **thread order**: each root is followed by its replies, oldest-first. Includes
+  **both** channels: team comments (`author_kind: "access"`) and reader comments
+  (`author_kind: "anon"`, posted via the public review page, carrying an `anchor`).
 - Optional `?status=open|resolved|all` (default `all`). The filter is
   thread-level — `open` returns unresolved roots **and their replies**,
   `resolved` returns resolved roots and their replies. An agent wanting just the
@@ -199,14 +207,17 @@ so shared across versions). It is `[]` when the artifact has no images.
 {
   "artifact_id": "x7Kp9qWm2AbCdE",
   "comments": [
-    { "id": "cmt_root", "author": "jane@team.com", "version": 2,
+    { "id": "cmt_root", "author": "jane@team.com", "author_kind": "access",
+      "author_email": null, "anchor": null, "version": 2,
       "body": "Tighten the intro.", "created_at": "2026-06-17T15:04:05Z",
       "parent_id": null, "resolved": true,
       "resolved_at": "2026-06-17T16:10:00Z", "resolved_by": "lead@team.com" },
-    { "id": "cmt_reply", "author": "lead@team.com", "version": 3,
-      "body": "Done in v3.", "created_at": "2026-06-17T16:09:00Z",
-      "parent_id": "cmt_root", "resolved": false,
-      "resolved_at": null, "resolved_by": null }
+    { "id": "cmt_reader", "author": "Alex R.", "author_kind": "anon",
+      "author_email": "alex@example.com", "version": 2,
+      "anchor": { "exact": "37% conversion", "prefix": "reached ",
+                  "suffix": " last quarter", "start": 812, "end": 826 },
+      "body": "This metric is stale.", "created_at": "2026-06-17T16:20:00Z",
+      "parent_id": null, "resolved": false, "resolved_at": null, "resolved_by": null }
   ]
 }
 ```
@@ -215,8 +226,18 @@ so shared across versions). It is `[]` when the artifact has no images.
   (a reply captures its own). `parent_id` is `null` for a root, else the root it
   hangs off (threads are one level — replies always attach to a root).
   `resolved`/`resolved_at`/`resolved_by` are thread state carried on the root;
-  replies are always `resolved: false`. A `"truncated": true` flag appears if the
-  (500) cap is hit. 404 `not_found` if the artifact does not exist.
+  replies are always `resolved: false`. `author_kind` is `access` (team, via
+  Cloudflare Access) or `anon` (reader, via the review page); `anchor` is the
+  quoted text span for reader roots (`null` for team comments and all replies);
+  `author_email` is the reader's unverified email or `null`. A `"truncated": true`
+  flag appears if the (500) cap is hit. 404 `not_found` if the artifact does not exist.
+
+### POST /v1/artifacts/{id}/comment-settings — toggle reader comments
+
+- Body `{ "enabled": true|false }`. Opts the artifact into (or out of) public
+  reader comments. 200 → the Artifact object with the updated `comments_enabled`.
+- `invalid_request` if enabling on a passcode-protected artifact (mutually
+  exclusive). 404 `not_found`, 409 `not_active` if deleted.
 
 ### GET /v1/artifacts/{id}/content — read content (Markdown by default)
 
@@ -279,9 +300,11 @@ scoped to a creator and includes `token_name`). Additionally:
 ### Comments (write + moderate)
 
 Humans author comments through Cloudflare Access (the dashboard); agents read
-them via the token endpoint above. All writes (comment, reply, resolve, delete)
+them via the token endpoint above. Team writes (comment, reply, resolve, delete)
 are Access-only — agents never write. `author`/`resolved_by` come from the Access
-JWT `email` claim — never a client field.
+JWT `email` claim — never a client field. The admin read/moderate endpoints below
+also see **reader** (`anon`) comments and can resolve/delete them; the resolve and
+delete verbs operate on any comment id regardless of kind.
 
 - `POST /v1/admin/artifacts/{id}/comments` — body `{ "body": "…", "parent_id"?: "cmt_…" }`
   (body ≤8 KB else `invalid_request`). Omit `parent_id` for a root; include it to
@@ -304,6 +327,38 @@ first token can be minted headlessly. This route exists because Cloudflare Acces
 intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there.
 `POST /v1/admin/tokens` also still accepts the bootstrap bearer for completeness.
 
+## Reader endpoints (public review page)
+
+When an artifact has `comments_enabled`, anyone with the link can comment on
+specific text via a trusted first-party **review page** — no account. These live
+on the API host, are **unauthenticated**, and never expose team comments or
+internal fields. Author identity is pseudonymous (a typed display name + optional
+unverified email). Writes are gated by the owner's opt-in and rate-limited per-IP
+and per-artifact.
+
+- `GET /review/{id}` — the review page (HTML). Renders the artifact in a
+  sandboxed, cross-origin iframe (`/{id}?annotate=1` on the artifact host) plus a
+  comment rail. Public; its own CSP is looser than artifact content (it frames the
+  doc and calls the reader API).
+- `GET /v1/reader/artifacts/{id}` — public metadata:
+  `{ "id", "title", "current_version", "comments_enabled", "versions": [ { "version", "created_at" } ] }`.
+  404 `not_found`, 410 `gone`.
+- `GET /v1/reader/artifacts/{id}/comments[?status=]` — **reader comments only**
+  (`author_kind: "anon"`), thread-ordered, `author_email` omitted. Same shape as
+  the token read otherwise, including `anchor`.
+- `POST /v1/reader/artifacts/{id}/comments` — post a reader comment. Body:
+  `{ "author_name", "author_email"?, "body", "anchor"?, "parent_id"? }`.
+  A **root** requires `anchor` (`{ "exact", "prefix", "suffix", "start", "end" }`,
+  `exact` ≤1000, context ≤64); a **reply** sets `parent_id` (an existing anon root
+  on this artifact) and omits `anchor`. `author_name` 1–80, `body` ≤8 KB.
+  201 → the reader comment (no `author_email`), setting an `sd_reviewer` cookie
+  (HttpOnly, Secure, SameSite=Lax) — the self-delete capability. Errors:
+  `comments_disabled` (403) when not opted in, `rate_limited` (429) with
+  `Retry-After`, `gone` (410), `not_found` (404), `invalid_request` (400).
+- `DELETE /v1/reader/comments/{cid}` — self-delete, gated by the `sd_reviewer`
+  cookie (only the author's own comment; cascades to replies). A missing/mismatched
+  cookie reads as 404 `not_found`.
+
 ## Serving behavior (snapdoc.carraes.dev) — for reference
 
 | Path | Behavior |
@@ -311,6 +366,7 @@ intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there
 | `/` and non-ID paths | Static assets (landing) |
 | `/{id}` | 200 latest version HTML; 404 missing; 410 expired/deleted (distinct friendly pages) |
 | `/{id}/v/{n}` | Version-pinned; same state rules |
+| `/{id}?annotate=1` | Annotate variant (only when `comments_enabled`): same HTML with the review annotator injected and the CSP relaxed to allow framing by, and script loading from, the API host. Served `private, no-store`. The bare `/{id}` is byte-for-byte unchanged. Framed by the review page; a direct hit is a no-op. |
 | `/{id}/a/{sha256}` | Hosted image bytes; `Content-Type` from the stored type, `Cache-Control: public, max-age=31536000, immutable`, `nosniff`. Same status/passcode gate as the page (404 missing, 410 expired/deleted, 401 if locked). `/{id}/v/{n}/a/{sha256}` also accepted. |
 | `POST /{id}/unlock` | Passcode entry: form field `passcode`; 303 + viewer cookie on success, 401 unlock page on failure |
 
