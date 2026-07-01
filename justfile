@@ -53,6 +53,10 @@ dashboard-dev:
 dashboard-build:
     @cd dashboard && npm run build
 
+# Build the review page + annotator into the worker's static assets (worker/public/review)
+review-build:
+    @cd review && npm run build
+
 # Apply schema to the local D1 database
 migrate-local:
     @cd {{worker_dir}} && npm run db:migrate:local
@@ -61,8 +65,8 @@ migrate-local:
 migrate-remote:
     @cd {{worker_dir}} && npm run db:migrate:remote
 
-# Deploy the worker (builds the dashboard, then uploads public/ assets too)
-deploy: dashboard-build
+# Deploy the worker (builds the dashboard + review page, then uploads public/ assets too)
+deploy: dashboard-build review-build
     @cd {{worker_dir}} && npx wrangler deploy
 
 # Print the current version
