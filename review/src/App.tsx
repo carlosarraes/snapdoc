@@ -3,8 +3,17 @@ import { api, ApiError, type Anchor, type Meta, type ReaderComment, relativeTime
 
 const rootEl = document.getElementById("root")!;
 const ARTIFACT_ID = rootEl.dataset.artifactId ?? "";
-const ARTIFACT_ORIGIN = rootEl.dataset.artifactOrigin ?? "";
+// Prod: the worker injects the (cross-origin) artifact host. Dev: it's empty, so
+// fall back to our own origin — the doc is same-origin under wrangler dev.
+const ARTIFACT_ORIGIN = rootEl.dataset.artifactOrigin || location.origin;
 const NAME_KEY = "snapdoc_reviewer_name";
+const EMAIL_KEY = "snapdoc_reviewer_email";
+const COLLAPSE_KEY = "snapdoc_rail_collapsed";
+
+interface Identity {
+  name: string;
+  email: string;
+}
 
 type AnnMsg =
   | { source: "snapdoc-annotator"; type: "ready"; textLength: number }
@@ -29,6 +38,14 @@ export default function App() {
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
 
+  // Identity is captured once and reused for every comment this session.
+  const [identity, setIdentity] = useState<Identity>(() => ({
+    name: localStorage.getItem(NAME_KEY) ?? "",
+    email: localStorage.getItem(EMAIL_KEY) ?? "",
+  }));
+  const [editingIdentity, setEditingIdentity] = useState(() => !localStorage.getItem(NAME_KEY));
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === "1");
+
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -45,7 +62,11 @@ export default function App() {
   }, [comments]);
 
   const sendToFrame = useCallback((msg: Record<string, unknown>) => {
-    iframeRef.current?.contentWindow?.postMessage({ v: 1, source: "snapdoc-rail", ...msg }, ARTIFACT_ORIGIN);
+    // The doc iframe is sandboxed without allow-same-origin, so its origin is
+    // opaque ("null") and a specific targetOrigin would never match — the browser
+    // would silently drop the message. "*" is safe here: the payload is only
+    // public anchors/ids, and the annotator still validates source + tag.
+    iframeRef.current?.contentWindow?.postMessage({ v: 1, source: "snapdoc-rail", ...msg }, "*");
   }, []);
 
   const renderAnchors = useCallback(() => {
@@ -53,7 +74,32 @@ export default function App() {
     sendToFrame({ type: "render", anchors });
   }, [roots, sendToFrame]);
 
-  // Load metadata + comments.
+  // Scroll the document to a comment's span and mark both sides focused.
+  const focusComment = useCallback(
+    (id: string) => {
+      setFocusId(id);
+      sendToFrame({ type: "focus", id });
+    },
+    [sendToFrame],
+  );
+
+  const saveIdentity = useCallback((name: string, email: string) => {
+    const n = name.trim();
+    const e = email.trim();
+    localStorage.setItem(NAME_KEY, n);
+    localStorage.setItem(EMAIL_KEY, e);
+    setIdentity({ name: n, email: e });
+    setEditingIdentity(false);
+  }, []);
+
+  const toggleCollapse = useCallback(() => {
+    setCollapsed((c) => {
+      const next = !c;
+      localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     let live = true;
     (async () => {
@@ -98,11 +144,11 @@ export default function App() {
   }, [renderAnchors]);
 
   const submitRoot = useCallback(
-    async (author: string, email: string, body: string) => {
-      if (!pending) return;
+    async (body: string) => {
+      if (!pending || !identity.name) return;
       const created = await api.post(ARTIFACT_ID, {
-        author_name: author,
-        author_email: email || undefined,
+        author_name: identity.name,
+        author_email: identity.email || undefined,
         body,
         anchor: pending,
       });
@@ -110,15 +156,24 @@ export default function App() {
       setMine((s) => new Set(s).add(created.id));
       setPending(null);
     },
-    [pending],
+    [pending, identity],
   );
 
-  const submitReply = useCallback(async (parentId: string, author: string, body: string) => {
-    const created = await api.post(ARTIFACT_ID, { author_name: author, body, parent_id: parentId });
-    setComments((cs) => [...cs, created]);
-    setMine((s) => new Set(s).add(created.id));
-    setReplyTo(null);
-  }, []);
+  const submitReply = useCallback(
+    async (parentId: string, body: string) => {
+      if (!identity.name) return;
+      const created = await api.post(ARTIFACT_ID, {
+        author_name: identity.name,
+        author_email: identity.email || undefined,
+        body,
+        parent_id: parentId,
+      });
+      setComments((cs) => [...cs, created]);
+      setMine((s) => new Set(s).add(created.id));
+      setReplyTo(null);
+    },
+    [identity],
+  );
 
   const remove = useCallback(async (id: string) => {
     await api.remove(id);
@@ -130,9 +185,30 @@ export default function App() {
 
   const orphanRoots = roots.filter((c) => orphans.has(c.id));
   const placedRoots = roots.filter((c) => !orphans.has(c.id));
+  const hasName = !!identity.name;
+
+  const threadProps = (c: ReaderComment, clickable: boolean) => ({
+    root: c,
+    replies: repliesByRoot.get(c.id) ?? [],
+    focused: focusId === c.id,
+    canDelete: mine.has(c.id),
+    enabled: meta.comments_enabled,
+    replying: replyTo === c.id,
+    hasName,
+    onFocus: clickable ? () => focusComment(c.id) : undefined,
+    onReply: () => setReplyTo(c.id),
+    onCancelReply: () => setReplyTo(null),
+    onSubmitReply: submitReply,
+    onNeedName: () => setEditingIdentity(true),
+    onDelete: remove,
+    registerRef: (el: HTMLDivElement | null) => {
+      if (el) cardRefs.current.set(c.id, el);
+    },
+    canDeleteReply: (rid: string) => mine.has(rid),
+  });
 
   return (
-    <div className="review">
+    <div className={`review${collapsed ? " collapsed" : ""}`}>
       {meta.comments_enabled ? (
         <iframe
           ref={iframeRef}
@@ -147,9 +223,20 @@ export default function App() {
         </div>
       )}
 
+      {collapsed && (
+        <button className="rail-toggle" onClick={toggleCollapse} title="Show comments">
+          💬 Comments{roots.length ? ` (${roots.length})` : ""}
+        </button>
+      )}
+
       <aside className="rail">
         <header className="rail-head">
-          <h1>{meta.title ?? "Untitled"}</h1>
+          <div className="rail-title">
+            <h1>{meta.title ?? "Untitled"}</h1>
+            <button className="link" onClick={toggleCollapse} title="Hide comments">
+              hide ✕
+            </button>
+          </div>
           <VersionPicker
             versions={meta.versions.map((v) => v.version)}
             current={meta.current_version}
@@ -158,9 +245,19 @@ export default function App() {
           />
         </header>
 
+        {meta.comments_enabled && (
+          <IdentityBar identity={identity} editing={editingIdentity} onEdit={() => setEditingIdentity(true)} onSave={saveIdentity} />
+        )}
+
         {meta.comments_enabled ? (
           pending ? (
-            <ComposeRoot anchor={pending} onCancel={() => setPending(null)} onSubmit={submitRoot} />
+            <ComposeRoot
+              anchor={pending}
+              hasName={hasName}
+              onCancel={() => setPending(null)}
+              onSubmit={submitRoot}
+              onNeedName={() => setEditingIdentity(true)}
+            />
           ) : (
             <p className="hint">Select text in the document to comment on it.</p>
           )
@@ -171,22 +268,7 @@ export default function App() {
         <div className="thread-list">
           {placedRoots.length === 0 && orphanRoots.length === 0 && <p className="hint">No comments yet.</p>}
           {placedRoots.map((c) => (
-            <Thread
-              key={c.id}
-              root={c}
-              replies={repliesByRoot.get(c.id) ?? []}
-              focused={focusId === c.id}
-              canDelete={mine.has(c.id)}
-              enabled={meta.comments_enabled}
-              replying={replyTo === c.id}
-              onFocus={() => sendToFrame({ type: "focus", id: c.id })}
-              onReply={() => setReplyTo(c.id)}
-              onCancelReply={() => setReplyTo(null)}
-              onSubmitReply={submitReply}
-              onDelete={remove}
-              registerRef={(el) => el && cardRefs.current.set(c.id, el)}
-              canDeleteReply={(rid) => mine.has(rid)}
-            />
+            <Thread key={c.id} {...threadProps(c, true)} />
           ))}
 
           {orphanRoots.length > 0 && (
@@ -194,23 +276,7 @@ export default function App() {
               <h2>Orphaned ({orphanRoots.length})</h2>
               <p className="hint">The text these comments referred to has changed in this version.</p>
               {orphanRoots.map((c) => (
-                <Thread
-                  key={c.id}
-                  root={c}
-                  replies={repliesByRoot.get(c.id) ?? []}
-                  focused={false}
-                  canDelete={mine.has(c.id)}
-                  enabled={meta.comments_enabled}
-                  replying={replyTo === c.id}
-                  orphaned
-                  onFocus={() => {}}
-                  onReply={() => setReplyTo(c.id)}
-                  onCancelReply={() => setReplyTo(null)}
-                  onSubmitReply={submitReply}
-                  onDelete={remove}
-                  registerRef={() => {}}
-                  canDeleteReply={(rid) => mine.has(rid)}
-                />
+                <Thread key={c.id} {...threadProps(c, false)} orphaned />
               ))}
             </section>
           )}
@@ -237,13 +303,56 @@ function VersionPicker(props: { versions: number[]; current: number; shown: numb
   );
 }
 
+// One-time identity: captured on first use, editable, reused for every comment.
+function IdentityBar(props: {
+  identity: Identity;
+  editing: boolean;
+  onEdit: () => void;
+  onSave: (name: string, email: string) => void;
+}) {
+  const [name, setName] = useState(props.identity.name);
+  const [email, setEmail] = useState(props.identity.email);
+  useEffect(() => {
+    setName(props.identity.name);
+    setEmail(props.identity.email);
+  }, [props.identity]);
+
+  if (!props.editing && props.identity.name) {
+    return (
+      <div className="identity">
+        <span>
+          Commenting as <strong>{props.identity.name}</strong>
+        </span>
+        <button className="link" onClick={props.onEdit}>
+          edit
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="identity-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (name.trim()) props.onSave(name, email);
+      }}
+    >
+      <input placeholder="Your name" value={name} required maxLength={80} autoFocus onChange={(e) => setName(e.target.value)} />
+      <input placeholder="Email (optional)" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <button type="submit" disabled={!name.trim()}>
+        Save
+      </button>
+    </form>
+  );
+}
+
 function ComposeRoot(props: {
   anchor: Anchor;
+  hasName: boolean;
   onCancel: () => void;
-  onSubmit: (author: string, email: string, body: string) => Promise<void>;
+  onSubmit: (body: string) => Promise<void>;
+  onNeedName: () => void;
 }) {
-  const [author, setAuthor] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
-  const [email, setEmail] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -253,8 +362,7 @@ function ComposeRoot(props: {
     setBusy(true);
     setErr(null);
     try {
-      localStorage.setItem(NAME_KEY, author.trim());
-      await props.onSubmit(author.trim(), email.trim(), body.trim());
+      await props.onSubmit(body.trim());
     } catch (e2) {
       setErr(e2 instanceof ApiError ? e2.message : "Could not post the comment.");
     } finally {
@@ -265,15 +373,18 @@ function ComposeRoot(props: {
   return (
     <form className="compose" onSubmit={submit}>
       <blockquote className="quote">{props.anchor.exact}</blockquote>
-      <input placeholder="Your name" value={author} required maxLength={80} onChange={(e) => setAuthor(e.target.value)} />
-      <input placeholder="Email (optional)" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <textarea placeholder="Add a comment…" value={body} required rows={3} onChange={(e) => setBody(e.target.value)} />
+      <textarea placeholder="Add a comment…" value={body} required rows={3} autoFocus onChange={(e) => setBody(e.target.value)} />
       {err && <p className="error">{err}</p>}
+      {!props.hasName && (
+        <button type="button" className="link" onClick={props.onNeedName}>
+          Add your name above to post
+        </button>
+      )}
       <div className="actions">
         <button type="button" onClick={props.onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="submit" disabled={busy || !author.trim() || !body.trim()}>
+        <button type="submit" disabled={busy || !body.trim() || !props.hasName}>
           {busy ? "Posting…" : "Comment"}
         </button>
       </div>
@@ -288,29 +399,32 @@ function Thread(props: {
   canDelete: boolean;
   enabled: boolean;
   replying: boolean;
+  hasName: boolean;
   orphaned?: boolean;
-  onFocus: () => void;
+  onFocus?: () => void;
   onReply: () => void;
   onCancelReply: () => void;
-  onSubmitReply: (parentId: string, author: string, body: string) => Promise<void>;
+  onSubmitReply: (parentId: string, body: string) => Promise<void>;
+  onNeedName: () => void;
   onDelete: (id: string) => Promise<void>;
   registerRef: (el: HTMLDivElement | null) => void;
   canDeleteReply: (id: string) => boolean;
 }) {
   return (
     <div ref={props.registerRef} className={`thread${props.focused ? " focused" : ""}`}>
-      <CommentCard
-        comment={props.root}
-        canDelete={props.canDelete}
-        onDelete={props.onDelete}
-        onQuoteClick={props.orphaned ? undefined : props.onFocus}
-      />
+      <CommentCard comment={props.root} canDelete={props.canDelete} onDelete={props.onDelete} onCardClick={props.onFocus} />
       {props.replies.map((r) => (
         <CommentCard key={r.id} comment={r} reply canDelete={props.canDeleteReply(r.id)} onDelete={props.onDelete} />
       ))}
       {props.enabled &&
         (props.replying ? (
-          <ReplyBox parentId={props.root.id} onCancel={props.onCancelReply} onSubmit={props.onSubmitReply} />
+          <ReplyBox
+            parentId={props.root.id}
+            hasName={props.hasName}
+            onCancel={props.onCancelReply}
+            onSubmit={props.onSubmitReply}
+            onNeedName={props.onNeedName}
+          />
         ) : (
           <button className="link" onClick={props.onReply}>
             Reply
@@ -325,21 +439,27 @@ function CommentCard(props: {
   reply?: boolean;
   canDelete: boolean;
   onDelete: (id: string) => Promise<void>;
-  onQuoteClick?: () => void;
+  onCardClick?: () => void;
 }) {
   const c = props.comment;
   return (
-    <div className={`card${props.reply ? " reply" : ""}`}>
-      {c.anchor && !props.reply && (
-        <blockquote className={`quote${props.onQuoteClick ? " clickable" : ""}`} onClick={props.onQuoteClick}>
-          {c.anchor.exact}
-        </blockquote>
-      )}
+    <div
+      className={`card${props.reply ? " reply" : ""}${props.onCardClick ? " clickable" : ""}`}
+      onClick={props.onCardClick}
+      title={props.onCardClick ? "Jump to this comment in the document" : undefined}
+    >
+      {c.anchor && !props.reply && <blockquote className="quote">{c.anchor.exact}</blockquote>}
       <div className="meta">
         <span className="author">{c.author}</span>
         <span className="time">{relativeTime(c.created_at)}</span>
         {props.canDelete && (
-          <button className="link danger" onClick={() => props.onDelete(c.id)}>
+          <button
+            className="link danger"
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onDelete(c.id);
+            }}
+          >
             Delete
           </button>
         )}
@@ -351,10 +471,11 @@ function CommentCard(props: {
 
 function ReplyBox(props: {
   parentId: string;
+  hasName: boolean;
   onCancel: () => void;
-  onSubmit: (parentId: string, author: string, body: string) => Promise<void>;
+  onSubmit: (parentId: string, body: string) => Promise<void>;
+  onNeedName: () => void;
 }) {
-  const [author, setAuthor] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -364,8 +485,7 @@ function ReplyBox(props: {
     setBusy(true);
     setErr(null);
     try {
-      localStorage.setItem(NAME_KEY, author.trim());
-      await props.onSubmit(props.parentId, author.trim(), body.trim());
+      await props.onSubmit(props.parentId, body.trim());
     } catch (e2) {
       setErr(e2 instanceof ApiError ? e2.message : "Could not post the reply.");
     } finally {
@@ -375,14 +495,18 @@ function ReplyBox(props: {
 
   return (
     <form className="compose reply-box" onSubmit={submit}>
-      <input placeholder="Your name" value={author} required maxLength={80} onChange={(e) => setAuthor(e.target.value)} />
-      <textarea placeholder="Reply…" value={body} required rows={2} onChange={(e) => setBody(e.target.value)} />
+      <textarea placeholder="Reply…" value={body} required rows={2} autoFocus onChange={(e) => setBody(e.target.value)} />
       {err && <p className="error">{err}</p>}
+      {!props.hasName && (
+        <button type="button" className="link" onClick={props.onNeedName}>
+          Add your name above to post
+        </button>
+      )}
       <div className="actions">
         <button type="button" onClick={props.onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="submit" disabled={busy || !author.trim() || !body.trim()}>
+        <button type="submit" disabled={busy || !body.trim() || !props.hasName}>
           {busy ? "Posting…" : "Reply"}
         </button>
       </div>

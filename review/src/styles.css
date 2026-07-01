@@ -69,9 +69,68 @@ body {
   gap: 0.75rem;
 }
 
+/* Collapsed: the document fills the viewport; a floating tab reopens the rail. */
+.review.collapsed {
+  grid-template-columns: 1fr;
+}
+.review.collapsed .rail {
+  display: none;
+}
+.rail-toggle {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
 .rail-head h1 {
   font-size: 1.05rem;
   margin: 0 0 0.25rem;
+}
+
+.rail-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+/* One-time identity row / form. */
+.identity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+}
+.identity strong {
+  color: var(--text);
+}
+.identity-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+}
+.identity-form input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+.identity-form button {
+  align-self: flex-end;
 }
 
 .version-picker {
@@ -143,8 +202,12 @@ body {
   overflow-wrap: anywhere;
 }
 
-.quote.clickable {
+.card.clickable {
   cursor: pointer;
+  border-radius: 6px;
+}
+.card.clickable:hover {
+  background: var(--bg);
 }
 
 .meta {

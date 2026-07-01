@@ -127,7 +127,11 @@ function rangeContainsPoint(range: Range, x: number, y: number): boolean {
 
 function injectStyle(): void {
   const style = document.createElement("style");
+  // Every commented span gets a clear amber underline (non-invasive — the CSS
+  // Custom Highlight API paints over the range without touching the DOM). The
+  // focused comment's span additionally gets a soft highlight.
   style.textContent =
-    "::highlight(sd-hl){background:rgba(255,213,0,.35);}::highlight(sd-hl-active){background:rgba(255,145,0,.55);}";
+    "::highlight(sd-hl){text-decoration-line:underline;text-decoration-color:#e3a008;text-decoration-thickness:2px;text-underline-offset:2px;}" +
+    "::highlight(sd-hl-active){text-decoration-line:underline;text-decoration-color:#e3a008;text-decoration-thickness:2px;text-underline-offset:2px;background:rgba(255,213,0,.4);}";
   (document.head ?? document.documentElement).appendChild(style);
 }
