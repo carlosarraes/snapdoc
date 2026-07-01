@@ -21,20 +21,25 @@ export interface PublishOptions {
   title?: string;
   ttl?: string;
   id?: string;
+  comments?: boolean;
+  passcode?: string;
 }
 
 export async function publish(opts: PublishOptions & { token: string }) {
   const params = new URLSearchParams();
   if (opts.title !== undefined) params.set("title", opts.title);
   if (opts.ttl !== undefined) params.set("ttl", opts.ttl);
+  if (opts.comments !== undefined) params.set("comments", opts.comments ? "1" : "0");
   const query = params.size ? `?${params}` : "";
   const path = opts.id ? `/v1/artifacts/${opts.id}/versions` : "/v1/artifacts";
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${opts.token}`,
+    "Content-Type": opts.contentType ?? "text/html",
+  };
+  if (opts.passcode) headers["X-Snapdoc-Passcode"] = opts.passcode;
   return SELF.fetch(`${API_BASE}${path}${query}`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${opts.token}`,
-      "Content-Type": opts.contentType ?? "text/html",
-    },
+    headers,
     body: opts.body ?? HTML_BODY,
   });
 }

@@ -97,6 +97,40 @@ describe("artifact serving", () => {
   });
 });
 
+describe("annotate mode", () => {
+  it("injects the annotator and relaxes the CSP when comments are enabled", async () => {
+    const tok = await mintToken();
+    const { id } = (await (await publish({ token: tok.token, comments: true })).json()) as { id: string };
+
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("/review/annotator.js");
+    const csp = res.headers.get("Content-Security-Policy")!;
+    expect(csp).toContain("frame-ancestors https://api.snapdoc.carraes.dev");
+    expect(csp).toContain("script-src 'unsafe-inline' https://api.snapdoc.carraes.dev");
+    // connect-src stays unset, so the doc still cannot reach the network.
+    expect(csp).not.toContain("connect-src");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("keeps the canonical /:id pristine (no annotator, strict CSP, cacheable)", async () => {
+    const tok = await mintToken();
+    const { id } = (await (await publish({ token: tok.token, comments: true })).json()) as { id: string };
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}`);
+    expect(await res.text()).not.toContain("/review/annotator.js");
+    expect(res.headers.get("Content-Security-Policy")!).toContain("frame-ancestors 'none'");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+  });
+
+  it("ignores ?annotate=1 unless the owner enabled comments", async () => {
+    const tok = await mintToken();
+    const { id } = (await (await publish({ token: tok.token })).json()) as { id: string };
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
+    expect(await res.text()).not.toContain("/review/annotator.js");
+    expect(res.headers.get("Content-Security-Policy")!).toContain("frame-ancestors 'none'");
+  });
+});
+
 describe("favicon fallback", () => {
   // Artifacts rarely declare an icon, so browsers request /favicon.ico on the
   // artifact host; answer with the snapdoc logo instead of a 404 globe.

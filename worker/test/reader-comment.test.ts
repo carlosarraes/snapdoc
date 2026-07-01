@@ -1,0 +1,283 @@
+import { SELF } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import { API_BASE, expectError, mintToken, publish } from "./helpers";
+
+interface ReaderComment {
+  id: string;
+  author: string;
+  author_kind: string;
+  version: number;
+  body: string;
+  created_at: string;
+  parent_id: string | null;
+  resolved: boolean;
+  anchor: { exact: string; prefix: string; suffix: string; start: number; end: number } | null;
+  author_email?: string;
+}
+
+const ANCHOR = { exact: "report", prefix: "the ", suffix: " here", start: 4, end: 10 };
+
+async function publishArtifact(token: string, opts: { comments?: boolean; passcode?: string } = {}): Promise<string> {
+  const res = await publish({ token, comments: opts.comments, passcode: opts.passcode });
+  return ((await res.json()) as { id: string }).id;
+}
+
+async function enableComments(id: string, token: string, enabled = true) {
+  return SELF.fetch(`${API_BASE}/v1/artifacts/${id}/comment-settings`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+type ReaderPayload = {
+  author_name?: string;
+  author_email?: string;
+  body?: string;
+  anchor?: unknown;
+  parent_id?: string;
+};
+
+async function postReader(id: string, payload: ReaderPayload, opts: { cookie?: string; ip?: string } = {}) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts.cookie) headers.Cookie = opts.cookie;
+  if (opts.ip) headers["CF-Connecting-IP"] = opts.ip;
+  return SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}/comments`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+}
+
+async function readReader(id: string, status?: string) {
+  const q = status ? `?status=${status}` : "";
+  return SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}/comments${q}`);
+}
+
+// Returns the `sd_reviewer=...` pair to echo back as a Cookie header.
+function cookieFrom(res: Response): string | null {
+  const raw = res.headers.get("set-cookie");
+  if (!raw) return null;
+  const match = /sd_reviewer=[^;]+/.exec(raw);
+  return match ? match[0] : null;
+}
+
+async function root(id: string, body = "note", extra: ReaderPayload = {}, opts: { cookie?: string } = {}) {
+  return postReader(id, { author_name: "Alex R.", body, anchor: ANCHOR, ...extra }, opts);
+}
+
+describe("reader comments — opt-in gating", () => {
+  it("rejects writes until the owner enables comments, then accepts them", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token);
+
+    await expectError(await root(id), 403, "comments_disabled");
+
+    expect((await enableComments(id, tok.token)).status).toBe(200);
+    const ok = await root(id);
+    expect(ok.status).toBe(201);
+    expect(((await ok.json()) as ReaderComment).author_kind).toBe("anon");
+  });
+
+  it("accepts comments when enabled at publish via ?comments=1", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    expect((await root(id)).status).toBe(201);
+  });
+
+  it("a later comment-settings=false stops new writes but keeps existing reads", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    await root(id, "still here");
+    expect((await enableComments(id, tok.token, false)).status).toBe(200);
+
+    await expectError(await root(id), 403, "comments_disabled");
+    const body = (await (await readReader(id)).json()) as { comments: ReaderComment[] };
+    expect(body.comments).toHaveLength(1);
+  });
+});
+
+describe("reader comments — validation", () => {
+  async function enabledArtifact(): Promise<string> {
+    const tok = await mintToken();
+    return publishArtifact(tok.token, { comments: true });
+  }
+
+  it("requires a 1–80 char author_name", async () => {
+    const id = await enabledArtifact();
+    await expectError(await postReader(id, { body: "x", anchor: ANCHOR }), 400, "invalid_request");
+    await expectError(await root(id, "x", { author_name: "  " }), 400, "invalid_request");
+    await expectError(await root(id, "x", { author_name: "n".repeat(81) }), 400, "invalid_request");
+  });
+
+  it("requires a non-empty body within the 8 KB cap", async () => {
+    const id = await enabledArtifact();
+    await expectError(await root(id, ""), 400, "invalid_request");
+    await expectError(await root(id, "x".repeat(8 * 1024 + 1)), 400, "invalid_request");
+  });
+
+  it("requires a well-formed anchor on a root comment", async () => {
+    const id = await enabledArtifact();
+    await expectError(await postReader(id, { author_name: "A", body: "x" }), 400, "invalid_request");
+    await expectError(await root(id, "x", { anchor: { exact: "", prefix: "", suffix: "", start: 0, end: 0 } }), 400, "invalid_request");
+    await expectError(await root(id, "x", { anchor: { exact: "a", prefix: "", suffix: "", start: 5, end: 2 } }), 400, "invalid_request");
+  });
+
+  it("stores a valid author_email but never exposes it on the public rail", async () => {
+    const id = await enabledArtifact();
+    await expectError(await root(id, "x", { author_email: "not-an-email" }), 400, "invalid_request");
+
+    const created = (await (await root(id, "flagged", { author_email: "alex@example.com" })).json()) as ReaderComment;
+    expect(created.author_email).toBeUndefined();
+
+    const body = (await (await readReader(id)).json()) as { comments: ReaderComment[] };
+    expect(body.comments[0].author_email).toBeUndefined();
+    expect(body.comments[0].anchor).toEqual(ANCHOR);
+    expect(body.comments[0].author_kind).toBe("anon");
+  });
+});
+
+describe("reader comments — threads and self-delete", () => {
+  it("replies attach to an anon root without an anchor and thread in order", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const rootC = (await (await root(id, "root note")).json()) as ReaderComment;
+
+    const reply = await postReader(id, { author_name: "Bo", body: "a reply", parent_id: rootC.id });
+    expect(reply.status).toBe(201);
+    expect(((await reply.json()) as ReaderComment).parent_id).toBe(rootC.id);
+
+    const body = (await (await readReader(id)).json()) as { comments: ReaderComment[] };
+    expect(body.comments.map((c) => c.body)).toEqual(["root note", "a reply"]);
+  });
+
+  it("refuses a reader reply onto a team (Access) comment", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const team = (await (
+      await SELF.fetch(`${API_BASE}/v1/admin/artifacts/${id}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Email": "lead@team.com" },
+        body: JSON.stringify({ body: "team note" }),
+      })
+    ).json()) as { id: string };
+    await expectError(await postReader(id, { author_name: "Bo", body: "sneaky", parent_id: team.id }), 400, "invalid_request");
+  });
+
+  it("lets a reader delete only their own comment, gated by the viewer cookie", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const res = await root(id, "delete me");
+    const cookie = cookieFrom(res)!;
+    expect(cookie).toBeTruthy();
+    const created = (await res.json()) as ReaderComment;
+
+    // No cookie → not found (never reveals the comment).
+    await expectError(
+      await SELF.fetch(`${API_BASE}/v1/reader/comments/${created.id}`, { method: "DELETE" }),
+      404,
+      "not_found",
+    );
+    // Wrong cookie → not found.
+    await expectError(
+      await SELF.fetch(`${API_BASE}/v1/reader/comments/${created.id}`, {
+        method: "DELETE",
+        headers: { Cookie: "sd_reviewer=rvw_wrongwrongwrongwrongwrongwrongwr" },
+      }),
+      404,
+      "not_found",
+    );
+    // Correct cookie → deleted, and it drops out of reads.
+    const del = await SELF.fetch(`${API_BASE}/v1/reader/comments/${created.id}`, {
+      method: "DELETE",
+      headers: { Cookie: cookie },
+    });
+    expect(del.status).toBe(200);
+    const body = (await (await readReader(id)).json()) as { comments: ReaderComment[] };
+    expect(body.comments).toHaveLength(0);
+  });
+});
+
+describe("reader comments — rate limiting", () => {
+  it("throttles a single IP after the per-IP hourly cap (429 + Retry-After)", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const ip = "203.0.113.7";
+    const limit = 20; // COMMENT_RATE_LIMIT_PER_IP_PER_HOUR
+
+    for (let i = 0; i < limit; i++) {
+      const res = await postReader(id, { author_name: "A", body: `c${i}`, anchor: ANCHOR }, { ip });
+      expect(res.status).toBe(201);
+    }
+    const blocked = await postReader(id, { author_name: "A", body: "over", anchor: ANCHOR }, { ip });
+    await expectError(blocked, 429, "rate_limited");
+    expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThan(0);
+
+    // A different IP is unaffected by the first IP's window.
+    const other = await postReader(id, { author_name: "B", body: "fresh", anchor: ANCHOR }, { ip: "198.51.100.9" });
+    expect(other.status).toBe(201);
+  });
+});
+
+describe("reader comments — meta and errors", () => {
+  it("exposes public metadata and 404/410 via the gate", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const meta = (await (await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`)).json()) as {
+      id: string;
+      comments_enabled: boolean;
+      current_version: number;
+      versions: { version: number }[];
+      token_name?: string;
+    };
+    expect(meta.id).toBe(id);
+    expect(meta.comments_enabled).toBe(true);
+    expect(meta.versions).toHaveLength(1);
+    expect(meta.token_name).toBeUndefined();
+
+    await expectError(await SELF.fetch(`${API_BASE}/v1/reader/artifacts/zzzzzzzzzzzzzz`), 404, "not_found");
+    await expectError(await root("zzzzzzzzzzzzzz"), 404, "not_found");
+  });
+});
+
+describe("reader comments — unified agent read-back", () => {
+  it("Bearer read returns both team and reader comments with anchors and kinds", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    await root(id, "reader feedback", { author_email: "alex@example.com" });
+    await SELF.fetch(`${API_BASE}/v1/admin/artifacts/${id}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Access-Email": "lead@team.com" },
+      body: JSON.stringify({ body: "team note" }),
+    });
+
+    const read = await SELF.fetch(`${API_BASE}/v1/artifacts/${id}/comments`, {
+      headers: { Authorization: `Bearer ${tok.token}` },
+    });
+    const body = (await read.json()) as { comments: ReaderComment[] };
+    const reader = body.comments.find((c) => c.author_kind === "anon")!;
+    const team = body.comments.find((c) => c.author_kind === "access")!;
+    expect(reader.anchor).toEqual(ANCHOR);
+    expect(reader.author).toBe("Alex R.");
+    // The agent read-back keeps author_email (unlike the public rail).
+    expect(reader.author_email).toBe("alex@example.com");
+    expect(team.anchor).toBeNull();
+    expect(team.author).toBe("lead@team.com");
+  });
+});
+
+describe("reader comments — passcode mutual exclusion", () => {
+  it("refuses to enable comments alongside a passcode", async () => {
+    const tok = await mintToken();
+    // publish + passcode + ?comments=1 in one shot
+    await expectError(
+      await publish({ token: tok.token, comments: true, passcode: "s3cret" }),
+      400,
+      "invalid_request",
+    );
+
+    // toggling comments on a passcode-protected artifact is refused
+    const protectedId = await publishArtifact(tok.token, { passcode: "s3cret" });
+    await expectError(await enableComments(protectedId, tok.token), 400, "invalid_request");
+  });
+});

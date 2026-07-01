@@ -28,15 +28,16 @@ interface PublishInput {
   title: string | null;
   ttlSeconds?: number;
   passcode?: string;
+  commentsEnabled?: boolean;
   assets?: UploadAsset[];
 }
 
-// Validates ?title= and ?ttl= shared by both publish paths. Returns a Response
-// on failure.
+// Validates ?title=, ?ttl= and ?comments= shared by both publish paths. Returns
+// a Response on failure.
 function validateTitleTtl(
   env: Env,
-  query: { title?: string; ttl?: string },
-): { title: string | null; ttlSeconds?: number } | Response {
+  query: { title?: string; ttl?: string; comments?: string },
+): { title: string | null; ttlSeconds?: number; commentsEnabled?: boolean } | Response {
   const title = query.title ?? null;
   if (title !== null && title.length > 200) {
     return errorResponse("invalid_request", "Title must be at most 200 characters.");
@@ -51,7 +52,14 @@ function validateTitleTtl(
     }
     ttlSeconds = parsed;
   }
-  return { title, ttlSeconds };
+  let commentsEnabled: boolean | undefined;
+  if (query.comments !== undefined) {
+    if (query.comments !== "0" && query.comments !== "1") {
+      return errorResponse("invalid_request", "comments must be 0 or 1.");
+    }
+    commentsEnabled = query.comments === "1";
+  }
+  return { title, ttlSeconds, commentsEnabled };
 }
 
 // Validates the shared publish inputs (content type, size, ttl, title) and
@@ -61,7 +69,7 @@ function validateTitleTtl(
 export async function readPublishInput(
   request: Request,
   env: Env,
-  query: { title?: string; ttl?: string },
+  query: { title?: string; ttl?: string; comments?: string },
 ): Promise<PublishInput | Response> {
   const rawType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
   if (rawType === "multipart/form-data") {
@@ -101,7 +109,14 @@ export async function readPublishInput(
   }
   // Passcode travels in a header (not a query param, which would be logged).
   const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
-  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds: meta.ttlSeconds, passcode };
+  return {
+    body,
+    contentType: "text/html",
+    title: resolvedTitle,
+    ttlSeconds: meta.ttlSeconds,
+    passcode,
+    commentsEnabled: meta.commentsEnabled,
+  };
 }
 
 // workers-types models FormData entries as `string`, but file parts arrive as
@@ -118,7 +133,7 @@ type MultipartForm = {
 async function readMultipartPublishInput(
   request: Request,
   env: Env,
-  query: { title?: string; ttl?: string },
+  query: { title?: string; ttl?: string; comments?: string },
 ): Promise<PublishInput | Response> {
   const maxBundle = Number(env.MAX_BUNDLE_BYTES);
   const maxImage = Number(env.MAX_IMAGE_BYTES);
@@ -195,7 +210,15 @@ async function readMultipartPublishInput(
     if (resolvedTitle === null) resolvedTitle = rendered.title;
   }
   const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
-  return { body, contentType: "text/html", title: resolvedTitle, ttlSeconds: meta.ttlSeconds, passcode, assets };
+  return {
+    body,
+    contentType: "text/html",
+    title: resolvedTitle,
+    ttlSeconds: meta.ttlSeconds,
+    passcode,
+    commentsEnabled: meta.commentsEnabled,
+    assets,
+  };
 }
 
 async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promise<Response | null> {
@@ -253,6 +276,7 @@ export function createPublisherApp(): Hono<ApiContext> {
     const input = await readPublishInput(c.req.raw, c.env, {
       title: c.req.query("title"),
       ttl: c.req.query("ttl"),
+      comments: c.req.query("comments"),
     });
     if (input instanceof Response) return input;
 
@@ -263,6 +287,7 @@ export function createPublisherApp(): Hono<ApiContext> {
       contentType: input.contentType,
       body: input.body,
       passcode: input.passcode,
+      commentsEnabled: input.commentsEnabled,
       assets: input.assets,
       artifactHost: c.env.ARTIFACT_HOST,
     });
@@ -281,6 +306,7 @@ export function createPublisherApp(): Hono<ApiContext> {
     const input = await readPublishInput(c.req.raw, c.env, {
       title: c.req.query("title"),
       ttl: c.req.query("ttl"),
+      comments: c.req.query("comments"),
     });
     if (input instanceof Response) return input;
 
@@ -290,6 +316,7 @@ export function createPublisherApp(): Hono<ApiContext> {
       defaultTtlSeconds: parseDuration(c.env.DEFAULT_TTL)!,
       contentType: input.contentType,
       body: input.body,
+      commentsEnabled: input.commentsEnabled,
       assets: input.assets,
       artifactHost: c.env.ARTIFACT_HOST,
     });
@@ -332,7 +359,7 @@ export function createPublisherApp(): Hono<ApiContext> {
     const { comments, truncated } = await store.listComments(id, status);
     return c.json({
       artifact_id: id,
-      comments: comments.map(commentJson),
+      comments: comments.map((cm) => commentJson(cm)),
       ...(truncated ? { truncated: true } : {}),
     });
   });
@@ -394,6 +421,20 @@ export function createPublisherApp(): Hono<ApiContext> {
       content_type: outContentType,
       content: outContent,
     });
+  });
+
+  app.post("/artifacts/:id/comment-settings", async (c) => {
+    let enabled: unknown;
+    try {
+      ({ enabled } = (await c.req.json()) as { enabled?: unknown });
+    } catch {
+      return errorResponse("invalid_request", "Body must be JSON: { \"enabled\": true|false }.");
+    }
+    if (typeof enabled !== "boolean") {
+      return errorResponse("invalid_request", "enabled must be a boolean.");
+    }
+    const artifact = await c.get("store").setCommentsEnabled(c.req.param("id"), enabled);
+    return c.json(artifactJson(artifact, c.env));
   });
 
   app.post("/artifacts/:id/expire", async (c) => {

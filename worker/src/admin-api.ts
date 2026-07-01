@@ -7,7 +7,7 @@
 // can be minted headlessly.
 import { Hono } from "hono";
 import { mapStoreError, parseCommentStatus, parseListParams } from "./api";
-import { artifactJson, assetJson, commentJson, errorResponse, versionJson } from "./http";
+import { artifactJson, assetJson, commentJson, errorResponse, MAX_COMMENT_BYTES, versionJson } from "./http";
 import { Store } from "./store";
 import type { Env } from "./types";
 
@@ -126,7 +126,6 @@ export async function mintTokenResponse(req: Request, store: Store): Promise<Res
 }
 
 const DEV_STUB_ENVIRONMENTS = ["dev", "test"];
-const MAX_COMMENT_BYTES = 8 * 1024;
 
 type AdminCtx = { Bindings: Env; Variables: { store: Store; accessEmail?: string } };
 
@@ -207,6 +206,20 @@ export function createAdminApp(): Hono<AdminCtx> {
     });
   });
 
+  app.post("/artifacts/:id/comment-settings", async (c) => {
+    let enabled: unknown;
+    try {
+      ({ enabled } = (await c.req.json()) as { enabled?: unknown });
+    } catch {
+      return errorResponse("invalid_request", "Body must be JSON: { \"enabled\": true|false }.");
+    }
+    if (typeof enabled !== "boolean") {
+      return errorResponse("invalid_request", "enabled must be a boolean.");
+    }
+    const artifact = await c.get("store").setCommentsEnabled(c.req.param("id"), enabled);
+    return c.json(artifactJson(artifact, c.env, { admin: true }));
+  });
+
   app.post("/artifacts/:id/expire", async (c) => {
     const artifact = await c.get("store").expireArtifact(c.req.param("id"));
     return c.json(artifactJson(artifact, c.env, { admin: true }));
@@ -252,7 +265,7 @@ export function createAdminApp(): Hono<AdminCtx> {
     const { comments, truncated } = await c.get("store").listComments(id, status);
     return c.json({
       artifact_id: id,
-      comments: comments.map(commentJson),
+      comments: comments.map((cm) => commentJson(cm)),
       ...(truncated ? { truncated: true } : {}),
     });
   });

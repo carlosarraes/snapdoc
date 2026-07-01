@@ -50,6 +50,45 @@ const ASSET_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
 };
 
+// Annotate-mode CSP: ARTIFACT_CSP with exactly two relaxations, so the review
+// page (and only it) may frame the doc and the first-party annotator script may
+// load. connect-src stays unset, so the doc itself still cannot reach the
+// network even here.
+function annotateCsp(apiHost: string): string {
+  return [
+    "default-src 'none'",
+    `script-src 'unsafe-inline' https://${apiHost}`,
+    "style-src 'unsafe-inline'",
+    "img-src https: data: blob:",
+    "font-src https: data:",
+    "media-src https: data: blob:",
+    `frame-ancestors https://${apiHost}`,
+    "form-action 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+}
+
+// Appends the review annotator to a document served in annotate mode. Mirrors
+// the HTMLRewriter streaming pattern in assets.ts; falls back to document end
+// for raw-HTML artifacts that have no <body>.
+async function injectAnnotator(html: string, apiHost: string): Promise<string> {
+  const tag = `<script src="https://${apiHost}/review/annotator.js" defer></script>`;
+  let bodySeen = false;
+  const rewriter = new HTMLRewriter()
+    .on("body", {
+      element(el) {
+        bodySeen = true;
+        el.append(tag, { html: true });
+      },
+    })
+    .onDocument({
+      end(end) {
+        if (!bodySeen) end.append(tag, { html: true });
+      },
+    });
+  return rewriter.transform(new Response(html)).text();
+}
+
 function statusPage(opts: { status: number; heading: string; message: string }): Response {
   const html = `<!doctype html>
 <html lang="en">
@@ -291,6 +330,22 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
   }
   if (content.state === "deleted") {
     return statusPage({ status: 410, heading: "Artifact removed", message: "This snapdoc artifact is no longer available." });
+  }
+
+  // Annotate mode (framed by the review page): inject the annotator and relax
+  // the CSP just enough to be framed by, and load its script from, the API host.
+  // Only honored when the owner opted in; the bare /:id stays pristine.
+  if (url.searchParams.get("annotate") === "1" && gate.commentsEnabled) {
+    const body = request.method === "HEAD" ? null : await injectAnnotator(content.html, env.API_HOST);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        ...BASE_HEADERS,
+        "Content-Security-Policy": annotateCsp(env.API_HOST),
+        "Content-Type": `${content.contentType}; charset=utf-8`,
+        "Cache-Control": "private, no-store",
+      },
+    });
   }
 
   return new Response(request.method === "HEAD" ? null : content.html, {

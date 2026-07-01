@@ -15,6 +15,7 @@ export type ErrorCode =
   | "too_large"
   | "too_many_assets"
   | "rate_limited"
+  | "comments_disabled"
   | "misconfigured"
   | "internal";
 
@@ -31,9 +32,13 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   too_large: 413,
   too_many_assets: 400,
   rate_limited: 429,
+  comments_disabled: 403,
   misconfigured: 503,
   internal: 500,
 };
+
+// Shared cap for both comment channels (team via Access, reader via review page).
+export const MAX_COMMENT_BYTES = 8 * 1024;
 
 export function errorResponse(code: ErrorCode, message: string, headers?: Record<string, string>): Response {
   return Response.json(
@@ -58,15 +63,19 @@ export function artifactJson(artifact: Artifact, env: Env, opts: { admin?: boole
     created_at: artifact.createdAt,
     expires_at: artifact.expiresAt,
     has_passcode: artifact.hasPasscode,
+    comments_enabled: artifact.commentsEnabled,
   };
   if (opts.admin) json.token_name = artifact.tokenName ?? null;
   return json;
 }
 
-export function commentJson(comment: Comment) {
-  return {
+// The `public` shape is served by the anonymous review rail; it carries the
+// text anchor but withholds author_email (unverified, and reader-private).
+export function commentJson(comment: Comment, opts: { public?: boolean } = {}) {
+  const json: Record<string, unknown> = {
     id: comment.id,
     author: comment.author,
+    author_kind: comment.authorKind,
     version: comment.version,
     body: comment.body,
     created_at: comment.createdAt,
@@ -74,7 +83,10 @@ export function commentJson(comment: Comment) {
     resolved: comment.resolvedAt !== null,
     resolved_at: comment.resolvedAt,
     resolved_by: comment.resolvedBy,
+    anchor: comment.anchor,
   };
+  if (!opts.public) json.author_email = comment.authorEmail;
+  return json;
 }
 
 // Identity subset of a token for /v1/whoami. Deliberately omits last_used_at

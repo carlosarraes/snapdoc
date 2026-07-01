@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { createPublisherApp, mapStoreError } from "./api";
 import { createAdminApp } from "./admin-api";
+import { createReaderApp } from "./reader-api";
+import { serveReviewPage } from "./review";
 import { serveArtifactHost } from "./serve";
 import { Store } from "./store";
 import { errorResponse } from "./http";
@@ -8,7 +10,11 @@ import type { Env } from "./types";
 
 const apiApp = new Hono<{ Bindings: Env }>();
 apiApp.route("/v1/admin", createAdminApp());
+// Public, unauthenticated — must be mounted before the Bearer-gated /v1 app.
+apiApp.route("/v1/reader", createReaderApp());
 apiApp.route("/v1", createPublisherApp());
+// Public review page; its :id handler falls through to static bundle files.
+apiApp.get("/review/:id", serveReviewPage);
 apiApp.onError((err) => mapStoreError(err));
 apiApp.notFound((c) => {
   if (c.req.path.startsWith("/v1/")) {
@@ -22,7 +28,13 @@ function isApiRequest(url: URL, env: Env): boolean {
   if (url.hostname === env.API_HOST) return true;
   if (url.hostname === env.ARTIFACT_HOST) return false;
   // wrangler dev fallback (single localhost host): route by path.
-  return url.pathname.startsWith("/v1/") || url.pathname === "/admin" || url.pathname.startsWith("/admin/");
+  return (
+    url.pathname.startsWith("/v1/") ||
+    url.pathname === "/admin" ||
+    url.pathname.startsWith("/admin/") ||
+    url.pathname === "/review" ||
+    url.pathname.startsWith("/review/")
+  );
 }
 
 export default {
