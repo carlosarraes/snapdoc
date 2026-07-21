@@ -251,6 +251,10 @@ func (p *PublishCmd) runVideo(g *Globals, streams *IO) error {
 // read, no new version is created. This is the only way to fix a poster that
 // failed on a previous publish/update without republishing the video.
 func (p *PublishCmd) runPosterOnly(g *Globals, streams *IO) error {
+	if err := p.posterOnlyFlagError(); err != nil {
+		return err
+	}
+
 	client, err := g.client()
 	if err != nil {
 		return err
@@ -272,6 +276,34 @@ func (p *PublishCmd) runPosterOnly(g *Globals, streams *IO) error {
 		)
 	}
 	return p.printPosterOnlyResult(g, streams, v)
+}
+
+// posterOnlyFlagError rejects any document-publish flag alongside a
+// poster-only retry: that mode only ever PUTs the poster against the
+// artifact's existing current version, so --title/--ttl/--markdown would
+// silently do nothing and --comments is video-incompatible anyway (mirroring
+// runVideo's hard-error stance on --comments rather than ignoring it).
+func (p *PublishCmd) posterOnlyFlagError() error {
+	var ignored []string
+	if p.Comments {
+		ignored = append(ignored, "--comments")
+	}
+	if p.Title != "" {
+		ignored = append(ignored, "--title")
+	}
+	if p.TTL != "" {
+		ignored = append(ignored, "--ttl")
+	}
+	if p.Markdown {
+		ignored = append(ignored, "--markdown")
+	}
+	if len(ignored) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s has no effect in poster-only mode (--update <id> --poster <file> with no file argument retries only the poster upload against the existing version)",
+		strings.Join(ignored, ", "),
+	)
 }
 
 // posterFlagError explains why --poster was rejected: either it was paired

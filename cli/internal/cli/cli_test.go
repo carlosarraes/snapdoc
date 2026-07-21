@@ -1555,6 +1555,43 @@ func TestPublishVideoCommentsFlagErrors(t *testing.T) {
 	}
 }
 
+func TestPublishVideoPosterOnlyRejectsRetryIncompatibleFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "comments", args: []string{"--comments"}, want: "--comments"},
+		{name: "ttl", args: []string{"--ttl", "7d"}, want: "--ttl"},
+		{name: "title", args: []string{"--title", "New Title"}, want: "--title"},
+		{name: "markdown", args: []string{"--markdown"}, want: "--markdown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupEnv(t)
+			srv := okServer(t, 200, `{"artifact":`+videoArtifactJSON+`,"versions":[]}`)
+			defer srv.Close()
+			writeConfig(t, dir, srv.URL, "tok-1")
+
+			poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+			args := append([]string{"publish", "--update", "vAbc123XyZ", "--poster", poster}, tt.args...)
+			stdout, stderr, code := runCLI(args, "")
+			if code == 0 {
+				t.Fatal("want non-zero exit")
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, tt.want) {
+				t.Errorf("stderr = %q, want it to name %s", stderr, tt.want)
+			}
+			if len(srv.reqs) != 0 {
+				t.Errorf("no request should be sent, got %d: %+v", len(srv.reqs), srv.reqs)
+			}
+		})
+	}
+}
+
 func TestPublishVideoPosterFailureNamesRetryCommand(t *testing.T) {
 	dir := setupEnv(t)
 	srv := routedServer(t, map[string]respSpec{
