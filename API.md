@@ -81,6 +81,11 @@ Video error messages are stable strings that never leak MP4 parser internals
 reads "The video must be H.264 with optional AAC audio.", and `video_too_long`
 always reads "The video duration exceeds the maximum of 10 minutes."
 
+`range_not_satisfiable` is the one exception to the error envelope above: it is
+answered directly by the media-serving host (`Artifact serving host`, not the
+API's `/v1/*` routes) as a bare `416` with a `Content-Range` header and no
+body, per RFC 7233 — never the `{ "error": ... }` JSON shape.
+
 ## Artifact object
 
 ```json

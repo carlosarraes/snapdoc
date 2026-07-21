@@ -240,13 +240,27 @@ export function ArtifactDetail() {
             <>
               <div className="section-label">video</div>
               <div className="card" style={{ padding: 16 }}>
-                <video
-                  className="video-player"
-                  controls
-                  preload="metadata"
-                  src={a.file_url}
-                  poster={a.poster_url ?? undefined}
-                />
+                {a.has_passcode ? (
+                  // The admin dashboard's origin never holds the reader's
+                  // sd_unlock_{id} cookie (it's only ever set by the watch
+                  // page's own unlock flow), so a direct <video src> here
+                  // would just 401 against a black player.
+                  <p className="muted">
+                    passcode-protected — open the{" "}
+                    <a href={a.url} target="_blank" rel="noreferrer">
+                      watch page
+                    </a>{" "}
+                    to view.
+                  </p>
+                ) : (
+                  <video
+                    className="video-player"
+                    controls
+                    preload="metadata"
+                    src={a.file_url}
+                    poster={a.poster_url ?? undefined}
+                  />
+                )}
                 <div className="row" style={{ marginTop: 12 }}>
                   {a.file_url && <CopyButton text={a.file_url} label="copy file url" />}
                 </div>
