@@ -81,6 +81,7 @@ describe("artifact lifecycle", () => {
     expect(art.title).toBe("Plan");
     expect(art.contentType).toBe("text/html");
     expect(art.sizeBytes).toBe(HTML.length);
+    expect(art.kind).toBe("document");
 
     const content = await store.getServableContent(art.id);
     expect(content).toMatchObject({ state: "active" });
@@ -117,6 +118,7 @@ describe("artifact lifecycle", () => {
     expect(got?.artifact.currentVersion).toBe(2);
     expect(got?.versions.map((v) => v.version)).toEqual([1, 2]);
     expect(got?.versions[1].sizeBytes).toBe("<p>v2</p>".length);
+    expect(got?.versions[0].kind).toBe("document");
   });
 
   it("addVersion on unknown id throws not_found; on deleted throws not_active", async () => {
@@ -180,6 +182,37 @@ describe("artifact lifecycle", () => {
     const store = makeStore();
     expect(await store.getServableContent("AAAAAAAAAAAAAA")).toBeNull();
     expect(await store.getArtifact("AAAAAAAAAAAAAA")).toBeNull();
+  });
+});
+
+describe("artifact kind schema", () => {
+  it("accepts a video metadata child row keyed to an existing version", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeArtifact(store, tok.id);
+    await env.DB.prepare(
+      `INSERT INTO video_versions
+         (artifact_id, version, filename, duration_ms, width, height, video_codec, audio_codec)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+    )
+      .bind(art.id, art.currentVersion, "clip.mp4", 12_000, 1920, 1080, "h264", "aac")
+      .run();
+    const row = await env.DB.prepare("SELECT filename FROM video_versions WHERE artifact_id = ?1 AND version = ?2")
+      .bind(art.id, art.currentVersion)
+      .first<{ filename: string }>();
+    expect(row?.filename).toBe("clip.mp4");
+  });
+
+  it("rejects an unknown artifact kind", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, kind) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6)",
+      )
+        .bind("AAAAAAAAAAAAAB", "t", tok.id, new Date().toISOString(), new Date().toISOString(), "audio")
+        .run(),
+    ).rejects.toThrow();
   });
 });
 

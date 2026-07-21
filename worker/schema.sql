@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   blobs_purged_at TEXT,
   passcode_hash TEXT,
   passcode_salt TEXT,
-  comments_enabled INTEGER NOT NULL DEFAULT 0
+  comments_enabled INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'document' CHECK (kind IN ('document', 'video'))
 );
 
 CREATE TABLE IF NOT EXISTS versions (
@@ -29,6 +30,25 @@ CREATE TABLE IF NOT EXISTS versions (
   size_bytes INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (artifact_id, version)
+);
+
+-- Per-version video metadata, keyed alongside the shared `versions` row it
+-- describes. Only populated for `kind = 'video'` artifacts (later tasks).
+CREATE TABLE IF NOT EXISTS video_versions (
+  artifact_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  filename TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  video_codec TEXT NOT NULL,
+  audio_codec TEXT,
+  poster_r2_key TEXT,
+  poster_content_type TEXT,
+  poster_size_bytes INTEGER,
+  PRIMARY KEY (artifact_id, version),
+  FOREIGN KEY (artifact_id, version)
+    REFERENCES versions(artifact_id, version)
 );
 
 -- Content-addressed images hosted with an artifact. Keyed by (artifact_id,
@@ -75,6 +95,13 @@ CREATE TABLE IF NOT EXISTS comment_events (
   ip_hash TEXT NOT NULL,
   artifact_id TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+-- Generic cursor storage for cron-driven background sweeps (e.g. the orphan
+-- audit added in a later task), keyed by sweep name.
+CREATE TABLE IF NOT EXISTS cleanup_state (
+  name TEXT PRIMARY KEY,
+  cursor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_artifact ON comments(artifact_id, created_at);

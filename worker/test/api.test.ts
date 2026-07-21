@@ -13,6 +13,7 @@ interface ArtifactJson {
   created_at: string;
   expires_at: string;
   token_name?: string;
+  kind: string;
 }
 
 describe("POST /v1/artifacts", () => {
@@ -29,6 +30,7 @@ describe("POST /v1/artifacts", () => {
     expect(art.content_type).toBe("text/html");
     expect(art.size_bytes).toBe(HTML_BODY.length);
     expect(art.token_name).toBeUndefined();
+    expect(art.kind).toBe("document");
     const expiresIn = new Date(art.expires_at).getTime() - new Date(art.created_at).getTime();
     expect(expiresIn).toBe(7 * 86400 * 1000);
   });
@@ -237,11 +239,13 @@ describe("GET /v1/artifacts/{id}", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       artifact: ArtifactJson;
-      versions: { version: number; size_bytes: number; content_type: string; created_at: string }[];
+      versions: { version: number; size_bytes: number; content_type: string; created_at: string; kind: string }[];
     };
     expect(body.artifact.current_version).toBe(2);
+    expect(body.artifact.kind).toBe("document");
     expect(body.versions.map((v) => v.version)).toEqual([1, 2]);
     expect(body.versions[0].size_bytes).toBe(HTML_BODY.length);
+    expect(body.versions[0].kind).toBe("document");
   });
 
   it("404s on unknown ids", async () => {

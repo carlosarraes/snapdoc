@@ -4,6 +4,8 @@ import { normalizeRef, rewriteImageRefs } from "./assets";
 
 export type ArtifactStatus = "active" | "expired" | "deleted";
 
+export type ArtifactKind = "document" | "video";
+
 export interface Artifact {
   id: string;
   title: string | null;
@@ -17,6 +19,7 @@ export interface Artifact {
   tokenName?: string;
   hasPasscode: boolean;
   commentsEnabled: boolean;
+  kind: ArtifactKind;
 }
 
 export interface ArtifactVersion {
@@ -24,6 +27,23 @@ export interface ArtifactVersion {
   contentType: string;
   sizeBytes: number;
   createdAt: string;
+  kind: ArtifactKind;
+}
+
+// Per-version video metadata, keyed alongside the shared `versions` row it
+// describes. Populated only for `kind = 'video'` artifacts (later tasks).
+export interface VideoVersionMetadata {
+  artifactId: string;
+  version: number;
+  filename: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  videoCodec: "h264";
+  audioCodec: "aac" | null;
+  posterR2Key: string | null;
+  posterContentType: "image/jpeg" | "image/png" | null;
+  posterSizeBytes: number | null;
 }
 
 // An image attached to a publish: `ref` is the verbatim reference string from
@@ -82,7 +102,7 @@ export type ServableContent =
   | { state: "expired" }
   | { state: "deleted" };
 
-export type StoreErrorCode = "not_found" | "not_active" | "invalid_request";
+export type StoreErrorCode = "not_found" | "not_active" | "invalid_request" | "kind_mismatch";
 
 export class StoreError extends Error {
   constructor(
@@ -194,6 +214,7 @@ interface ArtifactRow {
   size_bytes: number;
   has_passcode: number;
   comments_enabled: number;
+  kind: string;
 }
 
 function rowToArtifact(row: ArtifactRow): Artifact {
@@ -209,6 +230,7 @@ function rowToArtifact(row: ArtifactRow): Artifact {
     tokenId: row.token_id,
     hasPasscode: !!row.has_passcode,
     commentsEnabled: !!row.comments_enabled,
+    kind: row.kind as ArtifactKind,
   };
   if (row.token_name !== undefined) artifact.tokenName = row.token_name;
   return artifact;
@@ -298,6 +320,7 @@ const ARTIFACT_SELECT = `
          CASE WHEN a.status = 'active' AND a.expires_at <= ?1 THEN 'expired' ELSE a.status END AS effective_status,
          (a.passcode_hash IS NOT NULL) AS has_passcode,
          a.comments_enabled,
+         a.kind,
          v.content_type, v.size_bytes,
          t.name AS token_name
   FROM artifacts a
@@ -395,8 +418,12 @@ export class Store {
 
     await this.blobs.put(r2Key(id, 1), prepared.body, { httpMetadata: { contentType: input.contentType } });
     await this.db.batch([
+      // `kind` is hard-coded to 'document' here: this is the only artifact-creation
+      // path today, and callers cannot choose a different kind.
       this.db
-        .prepare("INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt, comments_enabled) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7, ?8)")
+        .prepare(
+          "INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt, comments_enabled, kind) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7, ?8, 'document')",
+        )
         .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt, input.commentsEnabled ? 1 : 0),
       this.db
         .prepare("INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, 1, ?2, ?3, ?4, ?5)")
@@ -585,11 +612,14 @@ export class Store {
       .all<{ version: number; content_type: string; size_bytes: number; created_at: string }>();
     return {
       artifact,
+      // Document artifacts are the only kind create/add-version can produce
+      // today, so every version row maps to "document".
       versions: results.map((v) => ({
         version: v.version,
         contentType: v.content_type,
         sizeBytes: v.size_bytes,
         createdAt: v.created_at,
+        kind: "document" as const,
       })),
     };
   }

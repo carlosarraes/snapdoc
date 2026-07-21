@@ -17,7 +17,8 @@ export type ErrorCode =
   | "rate_limited"
   | "comments_disabled"
   | "misconfigured"
-  | "internal";
+  | "internal"
+  | "kind_mismatch";
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
   invalid_request: 400,
@@ -35,6 +36,7 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   comments_disabled: 403,
   misconfigured: 503,
   internal: 500,
+  kind_mismatch: 400,
 };
 
 // Shared cap for both comment channels (team via Access, reader via review page).
@@ -64,6 +66,7 @@ export function artifactJson(artifact: Artifact, env: Env, opts: { admin?: boole
     expires_at: artifact.expiresAt,
     has_passcode: artifact.hasPasscode,
     comments_enabled: artifact.commentsEnabled,
+    kind: artifact.kind,
   };
   if (opts.admin) json.token_name = artifact.tokenName ?? null;
   return json;
@@ -106,6 +109,7 @@ export function versionJson(version: ArtifactVersion) {
     size_bytes: version.sizeBytes,
     content_type: version.contentType,
     created_at: version.createdAt,
+    kind: version.kind,
   };
 }
 

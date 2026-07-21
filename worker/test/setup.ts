@@ -12,7 +12,17 @@ beforeAll(async () => {
 
 // Storage is shared across tests (isolatedStorage is off), so reset explicitly.
 beforeEach(async () => {
-  for (const table of ["comments", "comment_events", "versions", "assets", "artifacts", "publish_events", "tokens"]) {
+  for (const table of [
+    "comments",
+    "comment_events",
+    "video_versions",
+    "versions",
+    "assets",
+    "artifacts",
+    "publish_events",
+    "tokens",
+    "cleanup_state",
+  ]) {
     await env.DB.prepare(`DELETE FROM ${table}`).run();
   }
   let cursor: string | undefined;
