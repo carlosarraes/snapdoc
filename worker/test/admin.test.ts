@@ -1,6 +1,6 @@
 import { SELF, env, fetchMock } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { API_BASE, expectError, mintToken, publish, store } from "./helpers";
+import { API_BASE, expectError, mintToken, publish, publishVideo, store } from "./helpers";
 
 const BOOTSTRAP = { Authorization: "Bearer test-bootstrap-secret" };
 
@@ -118,6 +118,36 @@ describe("admin artifact management", () => {
     const deleted = await adminFetch(`/artifacts/${created.id}`, { method: "DELETE" });
     expect(deleted.status).toBe(200);
     expect(await deleted.json()).toEqual({ id: created.id, status: "deleted" });
+  });
+
+  it("reports video metadata (file_url, duration_ms, per-version URLs) in the list and detail JSON", async () => {
+    const tok = await mintToken("video-owner");
+    const created = (await (await publishVideo({ token: tok.token })).json()) as {
+      id: string;
+      current_version: number;
+    };
+
+    const list = await adminFetch("/artifacts");
+    expect(list.status).toBe(200);
+    const { artifacts } = (await list.json()) as {
+      artifacts: { id: string; kind: string; file_url?: string; duration_ms?: number }[];
+    };
+    const listed = artifacts.find((a) => a.id === created.id)!;
+    expect(listed.kind).toBe("video");
+    expect(listed.file_url).toBeTruthy();
+    expect(listed.duration_ms).toBeGreaterThan(0);
+
+    const detail = await adminFetch(`/artifacts/${created.id}`);
+    expect(detail.status).toBe(200);
+    const detailBody = (await detail.json()) as {
+      artifact: { file_url?: string; duration_ms?: number };
+      versions: { kind: string; version_url?: string; version_file_url?: string }[];
+    };
+    expect(detailBody.artifact.file_url).toBeTruthy();
+    expect(detailBody.artifact.duration_ms).toBeGreaterThan(0);
+    const version = detailBody.versions.find((v) => v.kind === "video")!;
+    expect(version.version_url).toBeTruthy();
+    expect(version.version_file_url).toBeTruthy();
   });
 });
 

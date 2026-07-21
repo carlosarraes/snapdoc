@@ -8,6 +8,7 @@ import type {
   TokenRecord,
   VideoVersionMetadata,
 } from "./store";
+import { Store } from "./store";
 import type { Env } from "./types";
 
 export type ErrorCode =
@@ -197,6 +198,57 @@ export function versionJson(
     json.audio_codec = video.audioCodec;
   }
   return json;
+}
+
+// Video metadata lives in a separate video_versions row (one per version), so
+// listing/detail routes must fetch and splice it into the artifact/version
+// JSON before responding. The publisher and admin APIs both list and inspect
+// artifacts and must report identical video fields (file_url, duration_ms,
+// per-version URLs, ...) — this pair of helpers is the one implementation
+// both call, so the two surfaces cannot drift out of sync with each other.
+
+// Enriches a page of artifacts (as returned by `listArtifacts`) with each
+// video's current-version metadata, for GET /artifacts list responses.
+export async function artifactListJson(
+  store: Store,
+  artifacts: Artifact[],
+  env: Env,
+  opts: { admin?: boolean } = {},
+): Promise<Record<string, unknown>[]> {
+  return Promise.all(
+    artifacts.map(async (artifact) => {
+      const video =
+        artifact.kind === "video" ? ((await store.getVideoVersion(artifact.id, artifact.currentVersion)) ?? undefined) : undefined;
+      return artifactJson(artifact, env, { admin: opts.admin, video });
+    }),
+  );
+}
+
+// Builds the full GET /artifacts/:id response body (artifact + versions +
+// assets), fetching every version's video metadata so each version entry
+// carries its own file/poster URLs alongside the artifact-level current ones.
+export async function artifactDetailJson(
+  store: Store,
+  found: { artifact: Artifact; versions: ArtifactVersion[] },
+  env: Env,
+  opts: { admin?: boolean } = {},
+): Promise<{ artifact: Record<string, unknown>; versions: Record<string, unknown>[]; assets: Record<string, unknown>[] }> {
+  const videoByVersion = new Map<number, VideoVersionMetadata>();
+  if (found.artifact.kind === "video") {
+    for (const v of found.versions) {
+      const meta = await store.getVideoVersion(found.artifact.id, v.version);
+      if (meta) videoByVersion.set(v.version, meta);
+    }
+  }
+  const currentVideo = videoByVersion.get(found.artifact.currentVersion);
+  const assets = await store.listAssets(found.artifact.id);
+  return {
+    artifact: artifactJson(found.artifact, env, { admin: opts.admin, video: currentVideo }),
+    versions: found.versions.map((v) =>
+      versionJson(v, { id: found.artifact.id, env, video: videoByVersion.get(v.version) }),
+    ),
+    assets: assets.map((a) => assetJson(found.artifact.id, a, env)),
+  };
 }
 
 export function assetJson(artifactId: string, asset: StoredAsset, env: Env) {

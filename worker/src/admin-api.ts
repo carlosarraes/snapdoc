@@ -7,7 +7,7 @@
 // can be minted headlessly.
 import { Hono } from "hono";
 import { mapStoreError, parseCommentStatus, parseListParams } from "./api";
-import { artifactJson, assetJson, commentJson, errorResponse, MAX_COMMENT_BYTES, versionJson } from "./http";
+import { artifactDetailJson, artifactJson, artifactListJson, commentJson, errorResponse, MAX_COMMENT_BYTES } from "./http";
 import { Store } from "./store";
 import type { Env } from "./types";
 
@@ -187,9 +187,11 @@ export function createAdminApp(): Hono<AdminCtx> {
   app.get("/artifacts", async (c) => {
     const params = parseListParams(c.req.query("status"), c.req.query("limit"), c.req.query("cursor"));
     if (params instanceof Response) return params;
-    const { artifacts, nextCursor } = await c.get("store").listArtifacts(params);
+    const store = c.get("store");
+    const { artifacts, nextCursor } = await store.listArtifacts(params);
+    const jsons = await artifactListJson(store, artifacts, c.env, { admin: true });
     return c.json({
-      artifacts: artifacts.map((a) => artifactJson(a, c.env, { admin: true })),
+      artifacts: jsons,
       next_cursor: nextCursor,
     });
   });
@@ -198,12 +200,7 @@ export function createAdminApp(): Hono<AdminCtx> {
     const store = c.get("store");
     const found = await store.getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
-    const assets = await store.listAssets(found.artifact.id);
-    return c.json({
-      artifact: artifactJson(found.artifact, c.env, { admin: true }),
-      versions: found.versions.map((v) => versionJson(v)),
-      assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
-    });
+    return c.json(await artifactDetailJson(store, found, c.env, { admin: true }));
   });
 
   app.post("/artifacts/:id/comment-settings", async (c) => {

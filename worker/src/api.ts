@@ -11,11 +11,11 @@ import {
   type ArtifactStatus,
   type TokenRecord,
   type UploadAsset,
-  type VideoVersionMetadata,
 } from "./store";
 import {
+  artifactDetailJson,
   artifactJson,
-  assetJson,
+  artifactListJson,
   commentJson,
   errorResponse,
   parseDuration,
@@ -566,12 +566,7 @@ export function createPublisherApp(): Hono<ApiContext> {
     const params = parseListParams(c.req.query("status"), c.req.query("limit"), c.req.query("cursor"));
     if (params instanceof Response) return params;
     const { artifacts, nextCursor } = await store.listArtifacts({ tokenId: token.id, ...params });
-    const jsons = await Promise.all(
-      artifacts.map(async (a) => {
-        const video = a.kind === "video" ? ((await store.getVideoVersion(a.id, a.currentVersion)) ?? undefined) : undefined;
-        return artifactJson(a, c.env, { video });
-      }),
-    );
+    const jsons = await artifactListJson(store, artifacts, c.env);
     return c.json({
       artifacts: jsons,
       next_cursor: nextCursor,
@@ -582,27 +577,7 @@ export function createPublisherApp(): Hono<ApiContext> {
     const store = c.get("store");
     const found = await store.getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
-    const assets = await store.listAssets(found.artifact.id);
-
-    // Video metadata lives per-version, so fetch each version's row to
-    // enrich both the current artifact JSON and its own version entry.
-    let currentVideo: VideoVersionMetadata | undefined;
-    const videoByVersion = new Map<number, VideoVersionMetadata>();
-    if (found.artifact.kind === "video") {
-      for (const v of found.versions) {
-        const meta = await store.getVideoVersion(found.artifact.id, v.version);
-        if (meta) videoByVersion.set(v.version, meta);
-      }
-      currentVideo = videoByVersion.get(found.artifact.currentVersion);
-    }
-
-    return c.json({
-      artifact: artifactJson(found.artifact, c.env, { video: currentVideo }),
-      versions: found.versions.map((v) =>
-        versionJson(v, { id: found.artifact.id, env: c.env, video: videoByVersion.get(v.version) }),
-      ),
-      assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
-    });
+    return c.json(await artifactDetailJson(store, found, c.env));
   });
 
   app.get("/artifacts/:id/comments", async (c) => {
