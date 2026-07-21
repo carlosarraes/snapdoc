@@ -65,6 +65,24 @@ describe("htmlToMarkdown", () => {
     expect(out).toContain("const x = 1 < 2;");
   });
 
+  it("reconstructs mermaid source without generated figure chrome", async () => {
+    const source = "sequenceDiagram\n  Browser->>API: GET /deals\n  API-->>Browser: 200 OK";
+    const out = htmlToMarkdown(`
+      <figure class="sd-mermaid" data-snapdoc-mermaid="pending">
+        <div class="sd-mermaid-output">generated label</div>
+        <p class="sd-mermaid-error">Diagram could not be rendered.</p>
+        <details class="sd-mermaid-source" open>
+          <summary>Diagram source</summary>
+          <pre><code class="language-mermaid">${source}</code></pre>
+        </details>
+      </figure>
+    `);
+
+    expect(out).toBe(`\`\`\`mermaid\n${source}\n\`\`\`\n`);
+    expect(out).not.toContain("Diagram source");
+    expect(out).not.toContain("could not be rendered");
+  });
+
   it("converts GFM tables to pipe tables", async () => {
     const out = await roundTrip("| a | b |\n|---|---|\n| 1 | 2 |");
     expect(out).toContain("| a | b |");

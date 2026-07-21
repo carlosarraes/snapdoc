@@ -2,6 +2,8 @@ node_modules/
 .wrangler/
 dist/
 *.log
+review/test-results/
+review/playwright-report/
 cli/snapdoc
 TASKS.md
 CHANGELOG.md

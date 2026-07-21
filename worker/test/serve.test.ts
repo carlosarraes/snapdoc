@@ -90,6 +90,35 @@ describe("artifact serving", () => {
     expect(await res.text()).toBe(HTML_BODY);
   });
 
+  it("allows only the pinned self-hosted Mermaid runtime for Mermaid documents", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({
+        token: tok.token,
+        contentType: "text/markdown",
+        body: "```mermaid\nflowchart LR\nA-->B\n```",
+      })
+    ).json()) as { id: string };
+
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}`);
+    const html = await res.text();
+    const csp = res.headers.get("Content-Security-Policy")!;
+    expect(html).toContain('/review/mermaid-11.15.0.min.js');
+    expect(csp).toContain(`script-src 'unsafe-inline' ${ARTIFACT_BASE}/review/mermaid-11.15.0.min.js`);
+    expect(csp).not.toContain("script-src 'unsafe-inline' 'self'");
+    expect(csp).not.toContain("cdn.jsdelivr.net");
+    expect(csp).not.toContain("connect-src");
+  });
+
+  it("keeps the ordinary artifact CSP byte-for-byte unchanged", async () => {
+    const id = await publishedId();
+    const csp = (await SELF.fetch(`${ARTIFACT_BASE}/${id}`)).headers.get("Content-Security-Policy")!;
+
+    expect(csp).toContain("script-src 'unsafe-inline'; style-src");
+    expect(csp).not.toContain("/review/mermaid-");
+    expect(csp).not.toContain("script-src 'unsafe-inline' 'self'");
+  });
+
   it("rejects non-GET methods on artifact paths", async () => {
     const id = await publishedId();
     const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}`, { method: "POST", body: "x" });
@@ -128,6 +157,24 @@ describe("annotate mode", () => {
     const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
     expect(await res.text()).not.toContain("/review/annotator.js");
     expect(res.headers.get("Content-Security-Policy")!).toContain("frame-ancestors 'none'");
+  });
+
+  it("serves Mermaid documents with both the runtime and annotator in annotate mode", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({
+        token: tok.token,
+        comments: true,
+        contentType: "text/markdown",
+        body: "```mermaid\nsequenceDiagram\nA->>B: Hi\n```",
+      })
+    ).json()) as { id: string };
+
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
+    const html = await res.text();
+    expect(html).toContain('/review/mermaid-11.15.0.min.js');
+    expect(html).toContain('/review/annotator.js');
+    expect(res.headers.get("Content-Security-Policy")).toContain("script-src 'unsafe-inline' 'self'");
   });
 });
 

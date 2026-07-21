@@ -20,9 +20,10 @@ type RailMessage =
   | { source: "snapdoc-rail"; type: "clear" }
   | { source: "snapdoc-rail"; type: "focus"; id: string };
 
-if (window.parent !== window) main();
+if (window.parent !== window) void main();
 
-function main(): void {
+async function main(): Promise<void> {
+  await waitForMermaid();
   let parentOrigin = "*";
   let activeId: string | null = null;
   const placed: Placed[] = [];
@@ -116,6 +117,23 @@ function main(): void {
     highlightRegistry?.delete("sd-hl");
     highlightRegistry?.delete("sd-hl-active");
   }
+}
+
+function waitForMermaid(): Promise<void> {
+  if (!document.querySelector("[data-snapdoc-mermaid]")) return Promise.resolve();
+  if (document.documentElement.dataset.snapdocMermaidSettled === "1") return Promise.resolve();
+  return new Promise((resolve) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      document.removeEventListener("snapdoc:mermaid-settled", done);
+      resolve();
+    };
+    document.addEventListener("snapdoc:mermaid-settled", done, { once: true });
+    // A malformed raw-HTML artifact can spoof the marker without Snapdoc's
+    // bootstrap. Never leave annotation mode waiting forever in that case.
+    timeout = setTimeout(done, 5000);
+  });
 }
 
 function rangeContainsPoint(range: Range, x: number, y: number): boolean {

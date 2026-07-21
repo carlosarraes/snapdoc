@@ -30,6 +30,41 @@ describe("renderMarkdown", () => {
     expect(html).toContain("<pre>");
   });
 
+  it("renders a mermaid fence as an accessible figure with escaped source fallback", async () => {
+    const source = 'flowchart LR\n  A["<img src=x onerror=alert(1)>"] --> B';
+    const { html } = await renderMarkdown(`\`\`\`mermaid\n${source}\n\`\`\``);
+
+    expect(html).toContain('data-snapdoc-mermaid="pending"');
+    expect(html).toContain('id="snapdoc-mermaid-1"');
+    expect(html).toContain('<details class="sd-mermaid-source" open>');
+    expect(html).toContain('<code class="language-mermaid">');
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).not.toContain('<img src=x onerror=alert(1)>');
+    expect(html).toContain('/review/mermaid-11.15.0.min.js');
+    expect(html).toContain('integrity="sha384-yQ4mmBBT+vhTAwjFH0toJXNYJ6O4usWnt6EPIdWwrRvx2V/n5lXuDZQwQFeSFydF"');
+    expect(html).toContain("securityLevel: \"strict\"");
+    expect(html).toContain("htmlLabels: false");
+  });
+
+  it("loads the pinned runtime once for multiple mermaid fences", async () => {
+    const { html } = await renderMarkdown(
+      "```mermaid\nflowchart LR\nA-->B\n```\n\n```MERMAID\nsequenceDiagram\nA->>B: Hi\n```",
+    );
+
+    expect(html.match(/data-snapdoc-mermaid="pending"/g)).toHaveLength(2);
+    expect(html).toContain('id="snapdoc-mermaid-1"');
+    expect(html).toContain('id="snapdoc-mermaid-2"');
+    expect(html.match(/\/review\/mermaid-11\.15\.0\.min\.js/g)).toHaveLength(1);
+  });
+
+  it("keeps ordinary fenced code behavior unchanged", async () => {
+    const { html } = await renderMarkdown("```js\nconst diagram = 'mermaid';\n```");
+
+    expect(html).toContain('<pre><code class="language-js">');
+    expect(html).not.toContain("data-snapdoc-mermaid");
+    expect(html).not.toContain("/review/mermaid-");
+  });
+
   it("adds slug ids to headings", async () => {
     const { html } = await renderMarkdown("## Getting Started\n\ntext");
     expect(html).toContain('<h2 id="getting-started">');

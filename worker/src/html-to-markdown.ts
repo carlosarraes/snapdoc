@@ -13,7 +13,7 @@ const SKIP_TAGS = new Set(["head", "style", "script", "title", "meta", "link", "
 // Block-level tags whose children become their own paragraphs/lines.
 const BLOCK_TAGS = new Set([
   "h1", "h2", "h3", "h4", "h5", "h6",
-  "p", "ul", "ol", "blockquote", "pre", "table", "hr", "div", "section", "article",
+  "p", "ul", "ol", "blockquote", "pre", "table", "hr", "div", "section", "article", "figure",
 ]);
 
 interface Ctx {
@@ -74,10 +74,23 @@ function renderBlock(el: Element, ctx: Ctx): string {
       return renderList(el, ctx);
     case "table":
       return renderTable(el, ctx);
+    case "figure":
+      if ((el.attribs.class ?? "").split(/\s+/).includes("sd-mermaid")) {
+        return renderMermaidFigure(el);
+      }
+      return renderBlocks(el.children, ctx);
     default:
       // Unknown/structural container — recurse so nothing is silently dropped.
       return renderBlocks(el.children, ctx);
   }
+}
+
+function renderMermaidFigure(el: Element): string {
+  const pre = findAll(el, "pre").find((candidate) => {
+    const code = candidate.children.find((child): child is Element => isTag(child) && child.name === "code");
+    return (code?.attribs.class ?? "").split(/\s+/).includes("language-mermaid");
+  });
+  return pre ? renderPre(pre) : "";
 }
 
 function renderInline(nodes: AnyNode[], ctx: Ctx): string {

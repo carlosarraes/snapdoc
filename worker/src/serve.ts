@@ -3,7 +3,7 @@
 // POST /:id/unlock for passcode entry; everything else falls through to
 // static assets (landing page).
 import { buildMediaResponse, parseSingleRange, videoCacheControl } from "./media-range";
-import { escapeHtml } from "./markdown";
+import { escapeHtml, MERMAID_DOCUMENT_MARKER, MERMAID_RUNTIME_PATH } from "./markdown";
 import { Store, type Artifact, type ArtifactVersion } from "./store";
 import { videoFileUrl, videoPosterUrl, videoVersionFileUrl, videoVersionPosterUrl } from "./http";
 import { renderVideoPage, VIDEO_PAGE_CSP } from "./video-page";
@@ -36,6 +36,12 @@ const ARTIFACT_CSP = [
   "form-action 'none'",
   "base-uri 'none'",
 ].join("; ");
+
+function artifactCsp(html: string, requestUrl: string): string {
+  if (!html.includes(MERMAID_DOCUMENT_MARKER)) return ARTIFACT_CSP;
+  const runtimeUrl = new URL(MERMAID_RUNTIME_PATH, requestUrl).toString();
+  return ARTIFACT_CSP.replace("script-src 'unsafe-inline'", `script-src 'unsafe-inline' ${runtimeUrl}`);
+}
 
 // The unlock page is trusted snapdoc HTML (not user content), so it may submit
 // a form back to its own origin — which the artifact CSP forbids.
@@ -597,6 +603,7 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
     status: 200,
     headers: {
       ...BASE_HEADERS,
+      "Content-Security-Policy": artifactCsp(content.html, request.url),
       "Content-Type": `${content.contentType}; charset=utf-8`,
       // Never let a shared cache hold protected content — it could be served
       // to a viewer who never cleared the passcode.

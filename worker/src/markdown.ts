@@ -2,6 +2,77 @@ import { Marked } from "marked";
 
 // Replaceable renderer: trusted markdown text -> self-contained styled HTML document.
 
+export const MERMAID_VERSION = "11.15.0";
+export const MERMAID_RUNTIME_PATH = `/review/mermaid-${MERMAID_VERSION}.min.js`;
+export const MERMAID_RUNTIME_INTEGRITY =
+  "sha384-yQ4mmBBT+vhTAwjFH0toJXNYJ6O4usWnt6EPIdWwrRvx2V/n5lXuDZQwQFeSFydF";
+export const MERMAID_DOCUMENT_MARKER = `<meta name="snapdoc-mermaid" content="${MERMAID_VERSION}">`;
+
+const MERMAID_BOOTSTRAP = `<script>
+(() => {
+  const figures = () => Array.from(document.querySelectorAll("[data-snapdoc-mermaid]"));
+  const settle = () => {
+    document.documentElement.dataset.snapdocMermaidSettled = "1";
+    document.dispatchEvent(new CustomEvent("snapdoc:mermaid-settled"));
+  };
+  const fail = (figure) => {
+    figure.dataset.snapdocMermaid = "failed";
+    const error = figure.querySelector(".sd-mermaid-error");
+    const source = figure.querySelector(".sd-mermaid-source");
+    if (error) error.hidden = false;
+    if (source) source.open = true;
+  };
+  const render = async () => {
+    const diagrams = figures();
+    const mermaidApi = globalThis.mermaid;
+    if (!mermaidApi) {
+      diagrams.forEach(fail);
+      settle();
+      return;
+    }
+    mermaidApi.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      htmlLabels: false,
+      suppressErrorRendering: true,
+      maxTextSize: 50000,
+      maxEdges: 500,
+      theme: "neutral",
+      look: "classic",
+      layout: "dagre",
+      deterministicIds: true,
+      secure: [
+        "secure", "securityLevel", "startOnLoad", "htmlLabels",
+        "suppressErrorRendering", "maxTextSize", "maxEdges",
+        "dompurifyConfig", "theme", "themeCSS", "themeVariables",
+        "fontFamily", "look", "layout", "deterministicIds"
+      ]
+    });
+    for (let index = 0; index < diagrams.length; index++) {
+      const figure = diagrams[index];
+      const output = figure.querySelector(".sd-mermaid-output");
+      const source = figure.querySelector(".sd-mermaid-source code")?.textContent ?? "";
+      try {
+        if (!output || !source) throw new Error("Missing Mermaid source or output target.");
+        const result = await mermaidApi.render("snapdoc-mermaid-svg-" + (index + 1), source);
+        output.innerHTML = result.svg;
+        figure.dataset.snapdocMermaid = "rendered";
+        const details = figure.querySelector(".sd-mermaid-source");
+        if (details) details.open = false;
+      } catch {
+        fail(figure);
+      }
+    }
+    settle();
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => void render(), { once: true });
+  } else {
+    void render();
+  }
+})();
+</script>`;
+
 const THEME_CSS = `
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -23,6 +94,15 @@ th, td { border: 1px solid #d1d9e0; padding: 0.4em 0.8em; }
 th { background: #f6f8fa; }
 img { max-width: 100%; }
 hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
+.sd-mermaid { margin: 1.5rem 0; }
+.sd-mermaid-output { overflow-x: auto; padding: 1rem; border: 1px solid #d1d9e0; border-radius: 8px; background: #fff; }
+.sd-mermaid-output:empty { display: none; }
+.sd-mermaid-output svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.sd-mermaid-error { color: #cf222e; margin: 0.5rem 0; }
+.sd-mermaid-source { margin-top: 0.65rem; }
+.sd-mermaid-source summary { cursor: pointer; color: #59636e; font-size: 0.9rem; }
+.sd-mermaid-source pre { margin: 0.5rem 0 0; }
+.sd-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .toc { background: #f6f8fa; border: 1px solid #d1d9e0; border-radius: 8px; padding: 0.75rem 1rem; margin: 0 0 1.75rem; }
 .toc-title { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #59636e; margin-bottom: 0.4rem; }
 .toc ul { list-style: none; margin: 0; padding: 0; }
@@ -38,6 +118,8 @@ hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
   th, td { border-color: #30363d; }
   th { background: #161b22; }
   hr { border-color: #30363d; }
+  .sd-mermaid-output { border-color: #30363d; }
+  .sd-mermaid-source summary { color: #9198a1; }
   .toc { background: #161b22; border-color: #30363d; }
   .toc-title { color: #9198a1; }
 }
@@ -127,6 +209,7 @@ export async function renderMarkdown(
   // from leaking across requests (Workers reuse module globals).
   const headings: CollectedHeading[] = [];
   const seen = new Map<string, number>();
+  let mermaidCount = 0;
   const md = new Marked({ async: true, gfm: true });
   md.use({
     renderer: {
@@ -137,6 +220,21 @@ export async function renderMarkdown(
           headings.push({ depth: token.depth, slug, text: inner });
         }
         return `<h${token.depth} id="${slug}">${inner}</h${token.depth}>\n`;
+      },
+      code(token) {
+        if ((token.lang ?? "").trim().toLowerCase() !== "mermaid") return false;
+        mermaidCount++;
+        const id = `snapdoc-mermaid-${mermaidCount}`;
+        const captionId = `${id}-caption`;
+        return `<figure class="sd-mermaid" id="${id}" data-snapdoc-mermaid="pending" aria-labelledby="${captionId}">
+<figcaption class="sd-visually-hidden" id="${captionId}">Mermaid diagram ${mermaidCount}. Diagram source follows.</figcaption>
+<div class="sd-mermaid-output"></div>
+<p class="sd-mermaid-error" role="status" hidden>Diagram could not be rendered. Source is shown below.</p>
+<details class="sd-mermaid-source" open>
+<summary>Diagram source</summary>
+<pre><code class="language-mermaid">${escapeHtml(token.text)}\n</code></pre>
+</details>
+</figure>\n`;
       },
     },
   });
@@ -152,8 +250,9 @@ export async function renderMarkdown(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>${safeTitle}</title>
+${mermaidCount > 0 ? `${MERMAID_DOCUMENT_MARKER}\n` : ""}<title>${safeTitle}</title>
 <style>${THEME_CSS}</style>
+${mermaidCount > 0 ? `<script src="${MERMAID_RUNTIME_PATH}" integrity="${MERMAID_RUNTIME_INTEGRITY}" defer></script>\n${MERMAID_BOOTSTRAP}` : ""}
 </head>
 <body>
 ${tocHtml}${rendered}</body>
