@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,13 +26,14 @@ const artifactJSON = `{
 }`
 
 type recordedReq struct {
-	method   string
-	path     string
-	query    map[string]string
-	auth     string
-	ctype    string
-	passcode string
-	body     string
+	method        string
+	path          string
+	query         map[string]string
+	auth          string
+	ctype         string
+	passcode      string
+	body          string
+	contentLength int64
 }
 
 type fakeServer struct {
@@ -50,13 +52,14 @@ func newFakeServer(t *testing.T, handler func(r recordedReq, w http.ResponseWrit
 			q[k] = v[0]
 		}
 		req := recordedReq{
-			method:   r.Method,
-			path:     r.URL.Path,
-			query:    q,
-			auth:     r.Header.Get("Authorization"),
-			ctype:    r.Header.Get("Content-Type"),
-			passcode: r.Header.Get("X-Snapdoc-Passcode"),
-			body:     string(b),
+			method:        r.Method,
+			path:          r.URL.Path,
+			query:         q,
+			auth:          r.Header.Get("Authorization"),
+			ctype:         r.Header.Get("Content-Type"),
+			passcode:      r.Header.Get("X-Snapdoc-Passcode"),
+			body:          string(b),
+			contentLength: r.ContentLength,
 		}
 		fs.reqs = append(fs.reqs, req)
 		w.Header().Set("Content-Type", "application/json")
@@ -80,6 +83,27 @@ func errServer(t *testing.T, status int, code, message string, header map[string
 		}
 		w.WriteHeader(status)
 		io.WriteString(w, `{"error":{"code":"`+code+`","message":"`+message+`"}}`)
+	})
+}
+
+// respSpec is a canned status/body pair for routedServer.
+type respSpec struct {
+	status int
+	body   string
+}
+
+// routedServer replies per "METHOD /path" so a test can script a multi-step
+// exchange (e.g. video create, then a separate poster upload).
+func routedServer(t *testing.T, routes map[string]respSpec) *fakeServer {
+	return newFakeServer(t, func(r recordedReq, w http.ResponseWriter) {
+		spec, ok := routes[r.method+" "+r.path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":{"code":"not_found","message":"no route for `+r.method+" "+r.path+`"}}`)
+			return
+		}
+		w.WriteHeader(spec.status)
+		io.WriteString(w, spec.body)
 	})
 }
 
@@ -121,6 +145,79 @@ func writeTempFile(t *testing.T, name, content string) string {
 	}
 	return p
 }
+
+func writeTempBinaryFile(t *testing.T, name string, content []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// createFileOfSize makes a sparse file of exactly size bytes without writing
+// its content, for cheaply exercising a size-limit rejection.
+func createFileOfSize(t *testing.T, name string, size int64) (string, error) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	f, err := os.Create(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := f.Truncate(size); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// Fixtures live in the worker's test suite (not duplicated here); this is a
+// real, tiny H.264+AAC MP4 usable for the CLI's video publish path.
+const fixtureVideoH264AAC = "../../../worker/test/fixtures/video-h264-aac.mp4"
+
+// Minimal magic-byte-only images: enough for the CLI's local poster sniff,
+// which only inspects the leading signature bytes.
+var (
+	jpegMagicBytes = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F'}
+	pngMagicBytes  = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00}
+)
+
+const videoArtifactJSON = `{
+	"id": "vAbc123XyZ",
+	"url": "https://snapdoc.carraes.dev/vAbc123XyZ",
+	"file_url": "https://snapdoc.carraes.dev/vAbc123XyZ/media/video-h264-aac.mp4",
+	"version_url": "https://snapdoc.carraes.dev/vAbc123XyZ/v/1",
+	"version_file_url": "https://snapdoc.carraes.dev/vAbc123XyZ/v/1/media/video-h264-aac.mp4",
+	"title": "",
+	"status": "active",
+	"current_version": 1,
+	"content_type": "video/mp4",
+	"size_bytes": 3600,
+	"created_at": "2026-06-12T15:04:05Z",
+	"expires_at": "2026-06-15T15:04:05Z",
+	"kind": "video",
+	"duration_ms": 1234,
+	"width": 640,
+	"height": 360,
+	"video_codec": "h264",
+	"audio_codec": "aac"
+}`
+
+const videoVersionJSON = `{
+	"version": 1,
+	"size_bytes": 3600,
+	"content_type": "video/mp4",
+	"created_at": "2026-06-12T15:04:05Z",
+	"kind": "video",
+	"version_url": "https://snapdoc.carraes.dev/vAbc123XyZ/v/1",
+	"version_file_url": "https://snapdoc.carraes.dev/vAbc123XyZ/v/1/media/video-h264-aac.mp4",
+	"version_poster_url": "https://snapdoc.carraes.dev/vAbc123XyZ/v/1/poster.jpg",
+	"duration_ms": 1234,
+	"width": 640,
+	"height": 360,
+	"video_codec": "h264",
+	"audio_codec": "aac"
+}`
 
 // --- publish ---
 
@@ -972,6 +1069,512 @@ func TestPublishNoPasscodeNoHeader(t *testing.T) {
 	runCLI([]string{"publish", "-"}, "x")
 	if srv.reqs[0].passcode != "" {
 		t.Errorf("unexpected passcode header %q", srv.reqs[0].passcode)
+	}
+}
+
+// --- publish video ---
+
+func TestPublishVideoDetectsMP4BeforeReadInputAndStreamsExactLength(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	fi, err := os.Stat(fixtureVideoH264AAC)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if len(srv.reqs) != 1 {
+		t.Fatalf("want 1 request, got %d: %+v", len(srv.reqs), srv.reqs)
+	}
+	req := srv.reqs[0]
+	if req.method != "POST" || req.path != "/v1/artifacts" {
+		t.Errorf("request = %s %s, want POST /v1/artifacts", req.method, req.path)
+	}
+	if req.ctype != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4 (proves the video branch, not the document one)", req.ctype)
+	}
+	if req.query["filename"] != "video-h264-aac.mp4" {
+		t.Errorf("filename = %q, want the source file's basename", req.query["filename"])
+	}
+	if req.contentLength != fi.Size() {
+		t.Errorf("Content-Length = %d, want exactly %d", req.contentLength, fi.Size())
+	}
+	if int64(len(req.body)) != fi.Size() {
+		t.Errorf("streamed body length = %d, want %d", len(req.body), fi.Size())
+	}
+	if stdout == "" {
+		t.Error("want non-empty human output")
+	}
+}
+
+func TestPublishVideoForwardsFilenameTitleTTLPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--title", "Demo", "--ttl", "12h", "--passcode", "hunter2"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	req := srv.reqs[0]
+	if req.query["title"] != "Demo" {
+		t.Errorf("title = %q, want Demo", req.query["title"])
+	}
+	if req.query["ttl"] != "12h" {
+		t.Errorf("ttl = %q, want 12h", req.query["ttl"])
+	}
+	if req.passcode != "hunter2" {
+		t.Errorf("passcode header = %q, want hunter2", req.passcode)
+	}
+}
+
+func TestPublishVideoUpdatePostsToVersionsAndOmitsPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	updated := strings.Replace(videoArtifactJSON, `"current_version": 1`, `"current_version": 2`, 1)
+	srv := okServer(t, 201, updated)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--update", "vAbc123XyZ", "--passcode", "ignored-on-update"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	req := srv.reqs[0]
+	if req.method != "POST" || req.path != "/v1/artifacts/vAbc123XyZ/versions" {
+		t.Errorf("request = %s %s, want POST /v1/artifacts/vAbc123XyZ/versions", req.method, req.path)
+	}
+	if req.passcode != "" {
+		t.Errorf("passcode should not be sent on update, got %q", req.passcode)
+	}
+	if !strings.Contains(stdout, "2") {
+		t.Errorf("stdout %q should mention version 2", stdout)
+	}
+}
+
+func TestPublishVideoOmittedTTLLetsServerDefault(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if v, ok := srv.reqs[0].query["ttl"]; ok {
+		t.Errorf("ttl should be omitted so the server can default it, got %q", v)
+	}
+}
+
+func TestPublishVideoInvalidTTLSurfacesServerError(t *testing.T) {
+	dir := setupEnv(t)
+	srv := errServer(t, 400, "invalid_ttl", `TTL must be a duration between 1h and 7d, e.g. "12h" or "3d".`, nil)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--ttl", "30d"}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "invalid_ttl") {
+		t.Errorf("stderr = %q, want it to surface invalid_ttl", stderr)
+	}
+}
+
+func TestPublishVideoUploadsPoster(t *testing.T) {
+	dir := setupEnv(t)
+	srv := routedServer(t, map[string]respSpec{
+		"POST /v1/artifacts":                             {201, videoArtifactJSON},
+		"PUT /v1/artifacts/vAbc123XyZ/versions/1/poster": {200, videoVersionJSON},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--poster", poster}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if len(srv.reqs) != 2 {
+		t.Fatalf("want 2 requests (video + poster), got %d: %+v", len(srv.reqs), srv.reqs)
+	}
+	posterReq := srv.reqs[1]
+	if posterReq.method != "PUT" || posterReq.path != "/v1/artifacts/vAbc123XyZ/versions/1/poster" {
+		t.Errorf("poster request = %s %s, want PUT /v1/artifacts/vAbc123XyZ/versions/1/poster", posterReq.method, posterReq.path)
+	}
+	if posterReq.ctype != "image/jpeg" {
+		t.Errorf("poster Content-Type = %q, want image/jpeg", posterReq.ctype)
+	}
+	if posterReq.contentLength != int64(len(jpegMagicBytes)) {
+		t.Errorf("poster Content-Length = %d, want %d", posterReq.contentLength, len(jpegMagicBytes))
+	}
+}
+
+// TestPublishVideoPosterRetryTargetsReturnedVersion proves the poster always
+// targets whatever version the create/update call just returned (not a
+// hardcoded 1) — the mechanism that makes retrying the poster alone against
+// "artifact ID + version" (as named in a partial-failure error) land on the
+// right version.
+func TestPublishVideoPosterRetryTargetsReturnedVersion(t *testing.T) {
+	dir := setupEnv(t)
+	updated := strings.Replace(videoArtifactJSON, `"current_version": 1`, `"current_version": 2`, 1)
+	srv := routedServer(t, map[string]respSpec{
+		"POST /v1/artifacts/vAbc123XyZ/versions":         {201, updated},
+		"PUT /v1/artifacts/vAbc123XyZ/versions/2/poster": {200, videoVersionJSON},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.png", pngMagicBytes)
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--update", "vAbc123XyZ", "--poster", poster}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if len(srv.reqs) != 2 {
+		t.Fatalf("want 2 requests, got %d: %+v", len(srv.reqs), srv.reqs)
+	}
+	posterReq := srv.reqs[1]
+	if posterReq.path != "/v1/artifacts/vAbc123XyZ/versions/2/poster" {
+		t.Errorf("poster path = %q, want it to target the version just returned (2)", posterReq.path)
+	}
+	if posterReq.ctype != "image/png" {
+		t.Errorf("poster Content-Type = %q, want image/png", posterReq.ctype)
+	}
+}
+
+func TestPublishVideoHumanOutputIncludesWatchFileDurationSizeExpiry(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, _, code := runCLI([]string{"publish", fixtureVideoH264AAC}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	for _, want := range []string{
+		"vAbc123XyZ",
+		"https://snapdoc.carraes.dev/vAbc123XyZ", // watch URL
+		"https://snapdoc.carraes.dev/vAbc123XyZ/media/video-h264-aac.mp4", // file URL
+		"1.234s",               // duration (1234ms)
+		"3600 bytes",           // size
+		"2026-06-15T15:04:05Z", // expiry
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout %q missing %q", stdout, want)
+		}
+	}
+}
+
+func TestPublishVideoQuietPrintsOnlyWatchURL(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--quiet"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if stdout != "https://snapdoc.carraes.dev/vAbc123XyZ\n" {
+		t.Errorf("stdout = %q, want exactly the watch URL", stdout)
+	}
+}
+
+func TestPublishVideoJSONPrintsServerObject(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(stdout), &m); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if m["kind"] != "video" {
+		t.Errorf("kind = %v, want video", m["kind"])
+	}
+	if m["duration_ms"] == nil {
+		t.Error("missing duration_ms in JSON output")
+	}
+}
+
+func TestPublishVideoPosterFailureIncludesArtifactAndVersion(t *testing.T) {
+	dir := setupEnv(t)
+	srv := routedServer(t, map[string]respSpec{
+		"POST /v1/artifacts": {201, videoArtifactJSON},
+		"PUT /v1/artifacts/vAbc123XyZ/versions/1/poster": {
+			400,
+			`{"error":{"code":"unsupported_content_type","message":"Poster Content-Type must be image/jpeg or image/png."}}`,
+		},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--poster", poster}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "vAbc123XyZ") {
+		t.Errorf("stderr %q must name the artifact ID so the poster can be retried", stderr)
+	}
+	if !strings.Contains(stderr, "version 1") {
+		t.Errorf("stderr %q must name the version so the poster can be retried", stderr)
+	}
+	if !strings.Contains(stderr, "unsupported_content_type") {
+		t.Errorf("stderr %q should still surface the underlying failure", stderr)
+	}
+}
+
+func TestPublishVideoRejectsOversizePoster(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	f, err := createFileOfSize(t, "huge-poster.jpg", 5*1024*1024+1)
+	if err != nil {
+		t.Fatalf("createFileOfSize: %v", err)
+	}
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--poster", f}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "size limit") {
+		t.Errorf("stderr = %q, want it to name the size limit", stderr)
+	}
+	if len(srv.reqs) != 1 {
+		t.Errorf("only the video request should be sent, got %d: %+v", len(srv.reqs), srv.reqs)
+	}
+}
+
+func TestPublishVideoRejectsNonImagePoster(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	notImage := writeTempFile(t, "poster.txt", "not an image")
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--poster", notImage}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if !strings.Contains(stderr, "JPEG or PNG") {
+		t.Errorf("stderr = %q, want it to name the accepted poster formats", stderr)
+	}
+}
+
+func TestPublishVideoRejectsInvalidLocalMP4(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	f := writeTempFile(t, "not-really-a-video.mp4", "this is not an mp4")
+	stdout, stderr, code := runCLI([]string{"publish", f}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "not a valid mp4") {
+		t.Errorf("stderr = %q, want it to explain the file is not a valid mp4", stderr)
+	}
+	if len(srv.reqs) != 0 {
+		t.Errorf("no request should be sent for a file that fails local preflight, got %d", len(srv.reqs))
+	}
+}
+
+func TestPublishVideoStdinRejectedWithClearError(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	data, err := os.ReadFile(fixtureVideoH264AAC)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	stdout, stderr, code := runCLI([]string{"publish", "-"}, string(data))
+	if code == 0 {
+		t.Fatal("want non-zero exit for video piped via stdin")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "Content-Length") {
+		t.Errorf("stderr = %q, want it to explain the exact Content-Length requirement", stderr)
+	}
+	if len(srv.reqs) != 0 {
+		t.Errorf("no request should be sent, got %d", len(srv.reqs))
+	}
+}
+
+// --- publish video: poster-only retry & flag validation ---
+
+func TestPublishVideoPosterOnlyRetryUpdatesExistingVersion(t *testing.T) {
+	dir := setupEnv(t)
+	srv := routedServer(t, map[string]respSpec{
+		"GET /v1/artifacts/vAbc123XyZ":                   {200, `{"artifact":` + videoArtifactJSON + `,"versions":[]}`},
+		"PUT /v1/artifacts/vAbc123XyZ/versions/1/poster": {200, videoVersionJSON},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	stdout, stderr, code := runCLI([]string{"publish", "--update", "vAbc123XyZ", "--poster", poster}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if len(srv.reqs) != 2 {
+		t.Fatalf("want 2 requests (fetch + poster), got %d: %+v", len(srv.reqs), srv.reqs)
+	}
+	getReq := srv.reqs[0]
+	if getReq.method != "GET" || getReq.path != "/v1/artifacts/vAbc123XyZ" {
+		t.Errorf("first request = %s %s, want GET /v1/artifacts/vAbc123XyZ (no video is re-uploaded)", getReq.method, getReq.path)
+	}
+	posterReq := srv.reqs[1]
+	if posterReq.method != "PUT" || posterReq.path != "/v1/artifacts/vAbc123XyZ/versions/1/poster" {
+		t.Errorf("poster request = %s %s, want PUT /v1/artifacts/vAbc123XyZ/versions/1/poster", posterReq.method, posterReq.path)
+	}
+	if posterReq.ctype != "image/jpeg" {
+		t.Errorf("poster Content-Type = %q, want image/jpeg", posterReq.ctype)
+	}
+	if !strings.Contains(stdout, "vAbc123XyZ") {
+		t.Errorf("stdout %q should mention the artifact", stdout)
+	}
+}
+
+func TestPublishVideoPosterOnlyRejectsNonVideoArtifact(t *testing.T) {
+	dir := setupEnv(t)
+	srv := routedServer(t, map[string]respSpec{
+		"GET /v1/artifacts/x7Kp9qWm2AbCdE": {200, `{"artifact":` + artifactJSON + `,"versions":[]}`},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	stdout, stderr, code := runCLI([]string{"publish", "--update", "x7Kp9qWm2AbCdE", "--poster", poster}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "not a video") {
+		t.Errorf("stderr = %q, want it to explain the artifact is not a video", stderr)
+	}
+}
+
+func TestPublishVideoPosterWithoutUpdateOrFileErrors(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	stdout, stderr, code := runCLI([]string{"publish", "--poster", poster}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "--poster") {
+		t.Errorf("stderr = %q, want an actionable --poster error", stderr)
+	}
+	if len(srv.reqs) != 0 {
+		t.Errorf("no request should be sent, got %d", len(srv.reqs))
+	}
+}
+
+func TestPublishVideoPosterWithDocumentFileErrors(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	doc := writeTempFile(t, "report.html", "<h1>hi</h1>")
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	stdout, stderr, code := runCLI([]string{"publish", doc, "--poster", poster}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "video") {
+		t.Errorf("stderr = %q, want it to explain posters are video-only", stderr)
+	}
+	if len(srv.reqs) != 0 {
+		t.Errorf("no request should be sent, got %d", len(srv.reqs))
+	}
+}
+
+func TestPublishVideoCommentsFlagErrors(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, videoArtifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	stdout, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--comments"}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "--comments") {
+		t.Errorf("stderr = %q, want it to name --comments", stderr)
+	}
+	if len(srv.reqs) != 0 {
+		t.Errorf("no request should be sent, got %d", len(srv.reqs))
+	}
+}
+
+func TestPublishVideoPosterFailureNamesRetryCommand(t *testing.T) {
+	dir := setupEnv(t)
+	srv := routedServer(t, map[string]respSpec{
+		"POST /v1/artifacts": {201, videoArtifactJSON},
+		"PUT /v1/artifacts/vAbc123XyZ/versions/1/poster": {
+			400,
+			`{"error":{"code":"unsupported_content_type","message":"Poster Content-Type must be image/jpeg or image/png."}}`,
+		},
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok-1")
+
+	poster := writeTempBinaryFile(t, "poster.jpg", jpegMagicBytes)
+	_, stderr, code := runCLI([]string{"publish", fixtureVideoH264AAC, "--poster", poster}, "")
+	if code == 0 {
+		t.Fatal("want non-zero exit")
+	}
+	wantCmd := fmt.Sprintf("snapdoc publish --update vAbc123XyZ --poster %s", poster)
+	if !strings.Contains(stderr, wantCmd) {
+		t.Errorf("stderr %q must name the exact retry command %q", stderr, wantCmd)
 	}
 }
 

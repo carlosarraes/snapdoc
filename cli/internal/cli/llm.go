@@ -36,6 +36,39 @@ PUBLISH WITH IMAGES
 UPDATE (new version, same URL)
   snapdoc publish report.md --update <id>
 
+PUBLISH A VIDEO (MP4 recording, e.g. QA evidence)
+  snapdoc publish recording.mp4 --title "ABC-123 QA @ a1b2c3d" --ttl 3d --poster happy-path.jpg
+  snapdoc publish recording.mp4 --update <id>              # new version, same URL
+  A .mp4 file argument is auto-detected: it is streamed with an exact
+  Content-Length (never from stdin — pipe a video and you'll get a clear
+  rejection), after local preflight rejects obviously invalid files before
+  anything uploads. Limits: MP4 container, H.264 video, optional AAC audio,
+  <=100,000,000 bytes, <=10 minutes. TTL 1h-7d (default 3d if omitted — let the
+  server default it rather than passing one). --poster attaches a JPEG or PNG
+  (<=5 MiB, sniffed locally and again server-side) to the version just
+  published; --passcode applies only when creating (not on --update); --comments
+  is document-only and is rejected outright for a video.
+  Human output prints the watch URL, raw file URL, duration, size, and expiry;
+  --json prints every additive media field (kind, file_url, poster_url,
+  duration_ms, width, height, video_codec, audio_codec, and their
+  version-specific counterparts).
+  Videos are unlisted-public by default (like documents) so GitHub/GitLab can
+  render them inline from the file URL; add --passcode to protect one, but a
+  protected video's watch page requires unlocking first, so share it as a link
+  rather than an inline embed.
+
+RETRY A FAILED POSTER (no video re-upload)
+  snapdoc publish --update <id> --poster fixed.jpg   # no file argument
+  Poster upload is a separate request after the video succeeds, so a bad image
+  never blocks the video itself — but if it fails, the failure names the exact
+  command above (with the real artifact ID and version) to retry. That form
+  (--update <id> plus --poster, no file argument) fetches the artifact, checks
+  it's actually a video, and re-uploads only the poster against its current
+  version — it never re-publishes the video or creates a new version.
+  --poster only makes sense in two shapes: with a video file (create or
+  --update), or alone with --update and no file (the retry above); pairing it
+  with a document file, or with neither a file nor --update, is rejected.
+
 READ (token-cheap; Markdown by default)
   snapdoc read <id>            # Markdown (fewer tokens than HTML)
   snapdoc read <id> --raw      # original HTML
@@ -61,4 +94,6 @@ LIFECYCLE
 
 LIMITS
   Document <=2 MB. TTL 1h-90d (default 14d). 100 publishes/hour/token.
+  Video <=100,000,000 bytes, <=10 min, H.264 (+ optional AAC). TTL 1h-7d
+  (default 3d). Poster <=5 MiB, JPEG or PNG.
 `
