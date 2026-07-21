@@ -1,6 +1,7 @@
 // Deep module owning all R2 + D1 access and artifact/token lifecycle rules.
 // No raw SQL should exist outside this file.
-import { normalizeRef, rewriteImageRefs } from "./assets";
+import { detectPosterImageType, normalizeRef, rewriteImageRefs } from "./assets";
+import { inspectMp4, sanitizeVideoFilename, type RangeReader, type VideoMetadata } from "./video";
 
 export type ArtifactStatus = "active" | "expired" | "deleted";
 
@@ -44,6 +45,26 @@ export interface VideoVersionMetadata {
   posterR2Key: string | null;
   posterContentType: "image/jpeg" | "image/png" | null;
   posterSizeBytes: number | null;
+}
+
+export interface CreateVideoInput {
+  tokenId: string;
+  title: string | null;
+  ttlSeconds: number;
+  filename: string;
+  contentLength: number;
+  maxDurationMs: number;
+  body: ReadableStream;
+  passcode?: string;
+}
+
+export interface AddVideoVersionInput {
+  title?: string | null;
+  ttlSeconds: number;
+  filename: string;
+  contentLength: number;
+  maxDurationMs: number;
+  body: ReadableStream;
 }
 
 // An image attached to a publish: `ref` is the verbatim reference string from
@@ -117,9 +138,25 @@ export class StoreError extends Error {
 const ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const ARTIFACT_ID_LENGTH = 14;
 // Blobs of expired artifacts are retained for a grace period (so version history
-// survives a quick reactivation) before the cron purge removes them.
+// survives a quick reactivation) before the cron purge removes them. Videos get
+// no such grace (see cleanupExpired) — their blobs are large, so expired ones
+// are purged in the same hourly run instead.
 const EXPIRED_BLOB_RETENTION_SECONDS = 7 * 86400;
 const COMMENTS_LIMIT = 500;
+
+const VIDEO_CONTENT_TYPE = "video/mp4";
+// Matches the brief's literal upload cap; the primary MP4 is streamed straight
+// to R2 and this is checked against the stored object's real size afterward.
+const MAX_VIDEO_BYTES = 100_000_000;
+
+// Cron-driven orphan sweep bookkeeping (see auditOrphanVideoBlobs).
+const ORPHAN_VIDEO_AUDIT_STATE_NAME = "orphan_video_blobs";
+const ORPHAN_AUDIT_MIN_AGE_MS = 3600_000;
+// Only a primary video/document blob (`artifacts/{id}/v{n}`) or one of its
+// posters (`.../poster-<suffix>`, unique per upload — see posterR2Key) — never
+// an asset (`artifacts/{id}/assets/{hash}`) or anything else that might one
+// day live under the same prefix.
+const PRIMARY_OR_POSTER_KEY_PATTERN = /^artifacts\/[^/]+\/v\d+(?:\/poster-[A-Za-z0-9_-]+)?$/;
 
 function randomId(length: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(length));
@@ -198,6 +235,16 @@ function r2Key(artifactId: string, version: number): string {
 
 function assetR2Key(artifactId: string, hash: string): string {
   return `artifacts/${artifactId}/assets/${hash}`;
+}
+
+// Unique per upload (not deterministic like r2Key/assetR2Key): a poster
+// replace must be able to write its new blob under a fresh key so the prior
+// poster's bytes and D1 metadata stay intact until the D1 update actually
+// succeeds. R2 keys are private implementation details (D1's poster_r2_key
+// column is what every reader resolves through), so this shape is free to
+// change independent of anything external.
+function posterR2Key(artifactId: string, version: number, suffix: string): string {
+  return `artifacts/${artifactId}/v${version}/poster-${suffix}`;
 }
 
 interface ArtifactRow {
@@ -566,6 +613,9 @@ export class Store {
     const current = await this.fetchArtifact(id);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    if (current.kind !== "document") {
+      throw new StoreError("kind_mismatch", "Cannot add a document version to a video artifact.");
+    }
 
     // A new version may flip the comment opt-in; unspecified keeps the current
     // setting. Reader comments and a passcode remain mutually exclusive.
@@ -612,16 +662,218 @@ export class Store {
       .all<{ version: number; content_type: string; size_bytes: number; created_at: string }>();
     return {
       artifact,
-      // Document artifacts are the only kind create/add-version can produce
-      // today, so every version row maps to "document".
+      // Kind is an artifact-level property, so every version of one artifact
+      // shares it.
       versions: results.map((v) => ({
         version: v.version,
         contentType: v.content_type,
         sizeBytes: v.size_bytes,
         createdAt: v.created_at,
-        kind: "document" as const,
+        kind: artifact.kind,
       })),
     };
+  }
+
+  // ---- video artifacts ----
+  // The MP4 body streams straight into R2 (never buffered whole), then a
+  // bounded-range inspection via inspectMp4 derives its metadata. Every D1
+  // write commits in a single batch, only after that inspection succeeds; any
+  // failure past the `put` — inspection or the D1 batch itself — deletes the
+  // just-written object so no orphaned blob is left behind.
+
+  async createVideoArtifact(input: CreateVideoInput): Promise<Artifact & { video: VideoVersionMetadata }> {
+    const id = randomId(ARTIFACT_ID_LENGTH);
+    const version = 1;
+    const key = r2Key(id, version);
+    const filename = sanitizeVideoFilename(input.filename);
+    const now = new Date();
+    const createdAt = isoNow(now);
+    const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
+
+    let passcodeHash: string | null = null;
+    let passcodeSalt: string | null = null;
+    if (input.passcode) {
+      passcodeSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      passcodeHash = await derivePasscodeHash(input.passcode, passcodeSalt);
+    }
+
+    await this.blobs.put(key, input.body, { httpMetadata: { contentType: VIDEO_CONTENT_TYPE } });
+    try {
+      const metadata = await this.inspectStoredVideo(key, input.contentLength, input.maxDurationMs);
+      await this.db.batch([
+        // `kind` is hard-coded to 'video': this is the only video-creation path.
+        this.db
+          .prepare(
+            "INSERT INTO artifacts (id, title, status, token_id, current_version, created_at, expires_at, passcode_hash, passcode_salt, comments_enabled, kind) VALUES (?1, ?2, 'active', ?3, 1, ?4, ?5, ?6, ?7, 0, 'video')",
+          )
+          .bind(id, input.title, input.tokenId, createdAt, expiresAt, passcodeHash, passcodeSalt),
+        this.db
+          .prepare(
+            "INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+          )
+          .bind(id, version, key, VIDEO_CONTENT_TYPE, input.contentLength, createdAt),
+        this.videoVersionInsertStatement(id, version, filename, metadata),
+      ]);
+    } catch (err) {
+      await this.blobs.delete(key);
+      throw err;
+    }
+
+    const artifact = (await this.fetchArtifact(id))!;
+    const video = (await this.fetchVideoVersion(id, version))!;
+    return { ...artifact, video };
+  }
+
+  async addVideoVersion(id: string, input: AddVideoVersionInput): Promise<Artifact & { video: VideoVersionMetadata }> {
+    const current = await this.fetchArtifact(id);
+    if (!current) throw new StoreError("not_found", "Artifact not found.");
+    if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
+    if (current.kind !== "video") {
+      throw new StoreError("kind_mismatch", "Cannot add a video version to a document artifact.");
+    }
+
+    const version = current.currentVersion + 1;
+    const key = r2Key(id, version);
+    const filename = sanitizeVideoFilename(input.filename);
+    const now = new Date();
+    const createdAt = isoNow(now);
+    // Unlike a document version, the TTL is required and the expiry always
+    // resets from upload time — including reactivating an expired (but not
+    // deleted) video; its already-purged historical blobs are not restored.
+    const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
+    const title = input.title !== undefined && input.title !== null ? input.title : current.title;
+
+    await this.blobs.put(key, input.body, { httpMetadata: { contentType: VIDEO_CONTENT_TYPE } });
+    try {
+      const metadata = await this.inspectStoredVideo(key, input.contentLength, input.maxDurationMs);
+      await this.db.batch([
+        this.db
+          .prepare(
+            "INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+          )
+          .bind(id, version, key, VIDEO_CONTENT_TYPE, input.contentLength, createdAt),
+        this.db
+          .prepare(
+            "UPDATE artifacts SET status = 'active', current_version = ?1, expires_at = ?2, title = ?3, blobs_purged_at = NULL WHERE id = ?4",
+          )
+          .bind(version, expiresAt, title, id),
+        this.videoVersionInsertStatement(id, version, filename, metadata),
+      ]);
+    } catch (err) {
+      await this.blobs.delete(key);
+      throw err;
+    }
+
+    const artifact = (await this.fetchArtifact(id))!;
+    const video = (await this.fetchVideoVersion(id, version))!;
+    return { ...artifact, video };
+  }
+
+  private videoVersionInsertStatement(
+    id: string,
+    version: number,
+    filename: string,
+    metadata: VideoMetadata,
+  ): D1PreparedStatement {
+    return this.db
+      .prepare(
+        `INSERT INTO video_versions (artifact_id, version, filename, duration_ms, width, height, video_codec, audio_codec)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+      )
+      .bind(id, version, filename, metadata.durationMs, metadata.width, metadata.height, metadata.videoCodec, metadata.audioCodec);
+  }
+
+  // Verifies the just-written object's real R2 size (positive, matching the
+  // declared content length, within the hard cap) and then derives its
+  // metadata via bounded range reads. Never touches the object's full body.
+  private async inspectStoredVideo(key: string, contentLength: number, maxDurationMs: number): Promise<VideoMetadata> {
+    const head = await this.blobs.head(key);
+    const size = head?.size ?? 0;
+    if (size <= 0 || size !== contentLength || size > MAX_VIDEO_BYTES) {
+      throw new StoreError(
+        "invalid_request",
+        `Uploaded video size (${size} bytes) does not match the declared length (${contentLength} bytes) or exceeds the ${MAX_VIDEO_BYTES}-byte limit.`,
+      );
+    }
+    const reader: RangeReader = {
+      read: async (offset, length) => {
+        const object = await this.blobs.get(key, { range: { offset, length } });
+        if (!object) throw new StoreError("invalid_request", "Video object disappeared during inspection.");
+        return object.arrayBuffer();
+      },
+    };
+    return inspectMp4(reader, size, maxDurationMs);
+  }
+
+  async setVideoPoster(
+    id: string,
+    version: number,
+    bytes: Uint8Array,
+    contentType: "image/jpeg" | "image/png",
+  ): Promise<VideoVersionMetadata> {
+    const artifact = await this.fetchArtifact(id);
+    if (!artifact) throw new StoreError("not_found", "Artifact not found.");
+    if (artifact.kind !== "video") throw new StoreError("kind_mismatch", "Posters only apply to video artifacts.");
+    const existing = await this.fetchVideoVersion(id, version);
+    if (!existing) throw new StoreError("not_found", "Video version not found.");
+
+    // Never trust a caller-declared content type outright: sniff the actual
+    // bytes and only accept the two poster-safe raster formats.
+    const sniffed = detectPosterImageType(bytes);
+    if (!sniffed || sniffed !== contentType) {
+      throw new StoreError("invalid_request", "Poster must be a sniffed JPEG or PNG image matching the declared content type.");
+    }
+
+    // A fresh, unique key per upload — never the previous poster's key, even
+    // on a replace — so a failure after `put` can always cleanly delete just
+    // the new blob without ever touching the still-valid previous one, and a
+    // successful replace only removes the old blob after D1 points elsewhere.
+    const key = posterR2Key(id, version, randomId(16));
+    const previousKey = existing.posterR2Key;
+    await this.blobs.put(key, bytes, { httpMetadata: { contentType } });
+    try {
+      await this.db
+        .prepare(
+          "UPDATE video_versions SET poster_r2_key = ?1, poster_content_type = ?2, poster_size_bytes = ?3 WHERE artifact_id = ?4 AND version = ?5",
+        )
+        .bind(key, contentType, bytes.byteLength, id, version)
+        .run();
+    } catch (err) {
+      // The new key is always distinct from the previous one, so the old
+      // poster (blob + D1 metadata) is untouched and this only cleans up the
+      // orphaned new blob — mirrors the video body's delete-on-failure rule.
+      await this.blobs.delete(key);
+      throw err;
+    }
+    // Only after D1 durably points at the new key is the old one (if any)
+    // safe to remove.
+    if (previousKey) {
+      await this.blobs.delete(previousKey);
+    }
+    return (await this.fetchVideoVersion(id, version))!;
+  }
+
+  async getVideoVersion(id: string, version: number): Promise<VideoVersionMetadata | null> {
+    return this.fetchVideoVersion(id, version);
+  }
+
+  // ---- raw video/poster blob access ----
+  // These are the only place outside inspectStoredVideo that touch env.BLOBS
+  // for video content; the serving layer consumes them instead of the bucket
+  // binding directly.
+
+  async headVideoObject(id: string, version: number): Promise<R2Object | null> {
+    return this.blobs.head(r2Key(id, version));
+  }
+
+  async getVideoObject(id: string, version: number, range?: R2Range): Promise<R2ObjectBody | null> {
+    return this.blobs.get(r2Key(id, version), range ? { range } : undefined);
+  }
+
+  async getPosterObject(id: string, version: number): Promise<R2ObjectBody | null> {
+    const meta = await this.fetchVideoVersion(id, version);
+    if (!meta || !meta.posterR2Key) return null;
+    return this.blobs.get(meta.posterR2Key);
   }
 
   async listArtifacts(opts: {
@@ -953,14 +1205,21 @@ export class Store {
       .bind(nowIso)
       .run();
 
+    // Documents keep the grace-period cutoff; videos purge as soon as they're
+    // expired (large blobs, no grace) — same immediate condition that just
+    // marked them expired above.
     const retentionCutoff = new Date(now.getTime() - EXPIRED_BLOB_RETENTION_SECONDS * 1000).toISOString();
     const { results } = await this.db
       .prepare(
         `SELECT id FROM artifacts
          WHERE blobs_purged_at IS NULL
-           AND (status = 'deleted' OR (status = 'expired' AND expires_at <= ?1))`,
+           AND (
+             status = 'deleted'
+             OR (status = 'expired' AND kind = 'video' AND expires_at <= ?1)
+             OR (status = 'expired' AND kind = 'document' AND expires_at <= ?2)
+           )`,
       )
-      .bind(retentionCutoff)
+      .bind(nowIso, retentionCutoff)
       .all<{ id: string }>();
     for (const row of results) {
       await this.purgeBlobs(row.id);
@@ -973,6 +1232,51 @@ export class Store {
     await this.db.prepare("DELETE FROM comment_events WHERE created_at <= ?1").bind(rateLimitCutoff).run();
 
     return { markedExpired: marked.meta.changes ?? 0, blobsPurged: results.length };
+  }
+
+  // Scans at most `limit` R2 keys per run for stray video primary/poster blobs
+  // that no D1 row references — e.g. a write whose D1 batch failed after this
+  // class's own delete-on-failure already ran once, or any other stray write
+  // that predates that guarantee. Only objects older than one hour are
+  // eligible, so an upload's blob is never raced while its D1 batch is still
+  // in flight. Progress is persisted in `cleanup_state` (keyed by name) so
+  // consecutive hourly runs advance through the bucket instead of rescanning
+  // the same first page every time.
+  async auditOrphanVideoBlobs(limit = 100, now = new Date()): Promise<{ scanned: number; deleted: number }> {
+    const state = await this.db
+      .prepare("SELECT cursor FROM cleanup_state WHERE name = ?1")
+      .bind(ORPHAN_VIDEO_AUDIT_STATE_NAME)
+      .first<{ cursor: string | null }>();
+    const cursor = state?.cursor ?? undefined;
+
+    const listing = await this.blobs.list({ prefix: "artifacts/", cursor, limit });
+    const cutoffMs = now.getTime() - ORPHAN_AUDIT_MIN_AGE_MS;
+
+    let deleted = 0;
+    for (const object of listing.objects) {
+      if (!PRIMARY_OR_POSTER_KEY_PATTERN.test(object.key)) continue;
+      if (object.uploaded.getTime() > cutoffMs) continue;
+      if (await this.isVideoBlobReferenced(object.key)) continue;
+      await this.blobs.delete(object.key);
+      deleted++;
+    }
+
+    const nextCursor = listing.truncated ? listing.cursor : null;
+    await this.db
+      .prepare(
+        "INSERT INTO cleanup_state (name, cursor) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET cursor = excluded.cursor",
+      )
+      .bind(ORPHAN_VIDEO_AUDIT_STATE_NAME, nextCursor)
+      .run();
+
+    return { scanned: listing.objects.length, deleted };
+  }
+
+  private async isVideoBlobReferenced(key: string): Promise<boolean> {
+    const version = await this.db.prepare("SELECT 1 FROM versions WHERE r2_key = ?1").bind(key).first();
+    if (version) return true;
+    const poster = await this.db.prepare("SELECT 1 FROM video_versions WHERE poster_r2_key = ?1").bind(key).first();
+    return poster !== null;
   }
 
   // ---- internals ----
@@ -993,6 +1297,41 @@ export class Store {
     return row ? rowToComment(row) : null;
   }
 
+  private async fetchVideoVersion(id: string, version: number): Promise<VideoVersionMetadata | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT filename, duration_ms, width, height, video_codec, audio_codec,
+                poster_r2_key, poster_content_type, poster_size_bytes
+         FROM video_versions WHERE artifact_id = ?1 AND version = ?2`,
+      )
+      .bind(id, version)
+      .first<{
+        filename: string;
+        duration_ms: number;
+        width: number;
+        height: number;
+        video_codec: string;
+        audio_codec: string | null;
+        poster_r2_key: string | null;
+        poster_content_type: string | null;
+        poster_size_bytes: number | null;
+      }>();
+    if (!row) return null;
+    return {
+      artifactId: id,
+      version,
+      filename: row.filename,
+      durationMs: row.duration_ms,
+      width: row.width,
+      height: row.height,
+      videoCodec: row.video_codec as "h264",
+      audioCodec: row.audio_codec as "aac" | null,
+      posterR2Key: row.poster_r2_key,
+      posterContentType: row.poster_content_type as "image/jpeg" | "image/png" | null,
+      posterSizeBytes: row.poster_size_bytes,
+    };
+  }
+
   private async purgeBlobs(id: string): Promise<void> {
     const versions = await this.db
       .prepare("SELECT r2_key FROM versions WHERE artifact_id = ?1")
@@ -1002,7 +1341,15 @@ export class Store {
       .prepare("SELECT hash FROM assets WHERE artifact_id = ?1")
       .bind(id)
       .all<{ hash: string }>();
-    const keys = [...versions.results.map((r) => r.r2_key), ...assets.results.map((a) => assetR2Key(id, a.hash))];
+    const posters = await this.db
+      .prepare("SELECT poster_r2_key FROM video_versions WHERE artifact_id = ?1 AND poster_r2_key IS NOT NULL")
+      .bind(id)
+      .all<{ poster_r2_key: string }>();
+    const keys = [
+      ...versions.results.map((r) => r.r2_key),
+      ...assets.results.map((a) => assetR2Key(id, a.hash)),
+      ...posters.results.map((p) => p.poster_r2_key),
+    ];
     if (keys.length) await this.blobs.delete(keys);
   }
 }

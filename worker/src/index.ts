@@ -45,6 +45,8 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await new Store(env.DB, env.BLOBS).cleanupExpired();
+    const store = new Store(env.DB, env.BLOBS);
+    await store.cleanupExpired();
+    await store.auditOrphanVideoBlobs();
   },
 } satisfies ExportedHandler<Env>;

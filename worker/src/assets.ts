@@ -41,6 +41,14 @@ export function detectImageType(bytes: Uint8Array): string | null {
   return null;
 }
 
+// Video posters accept a narrower set than general hosted images (no
+// gif/webp/avif): only the two raster formats browsers render inline as a
+// <video poster> without any format-support fallback.
+export function detectPosterImageType(bytes: Uint8Array): "image/jpeg" | "image/png" | null {
+  const detected = detectImageType(bytes);
+  return detected === "image/jpeg" || detected === "image/png" ? detected : null;
+}
+
 // A bare relative path that could name a local file the author bundled — i.e.
 // not a URL (scheme or protocol-relative), not a root-absolute path, not a
 // fragment. Only these are candidates for rewriting/upload.

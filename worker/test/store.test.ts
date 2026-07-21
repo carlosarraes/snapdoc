@@ -1,12 +1,83 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { Store, StoreError } from "../src/store";
+import { detectPosterImageType } from "../src/assets";
+import { Store, StoreError, type CreateVideoInput } from "../src/store";
+import { sanitizeVideoFilename } from "../src/video";
+import { JPEG_BYTES, PNG_BYTES } from "./helpers";
 
 const HTML = "<!doctype html><html><body>hi</body></html>";
 const DAY = 86400;
 
 function makeStore() {
   return new Store(env.DB, env.BLOBS);
+}
+
+// The workers pool runtime has no filesystem access, so binary test fixtures
+// are base64-encoded in vitest.config.ts and handed over as env bindings (see
+// test/video.test.ts for the same pattern).
+function decodeBase64(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+type VideoFixtureName = "video-h264-aac.mp4" | "video-h264-silent.mp4";
+
+function fixtureBytes(name: VideoFixtureName): Uint8Array {
+  switch (name) {
+    case "video-h264-aac.mp4":
+      return decodeBase64(env.FIXTURE_VIDEO_H264_AAC_B64);
+    case "video-h264-silent.mp4":
+      return decodeBase64(env.FIXTURE_VIDEO_H264_SILENT_B64);
+  }
+}
+
+function streamOf(bytes: Uint8Array): ReadableStream {
+  return new Blob([bytes]).stream();
+}
+
+// A declared-length, chunked zero-filled stream for exercising the upload
+// size cap without materializing 100+ MB in a single in-memory buffer. R2's
+// `put()` requires a stream with a known length (same constraint a real
+// Content-Length-bearing request body satisfies), which a plain generator
+// ReadableStream does not have — FixedLengthStream is the runtime primitive
+// that provides one while still writing incrementally.
+function fixedLengthStream(totalBytes: number): ReadableStream {
+  const { readable, writable } = new FixedLengthStream(totalBytes);
+  const writer = writable.getWriter();
+  const CHUNK = 1024 * 1024;
+  void (async () => {
+    let sent = 0;
+    while (sent < totalBytes) {
+      const size = Math.min(CHUNK, totalBytes - sent);
+      await writer.write(new Uint8Array(size));
+      sent += size;
+    }
+    await writer.close();
+  })();
+  return readable;
+}
+
+const VIDEO_MAX_DURATION_MS = 600_000;
+
+async function makeVideoArtifact(
+  store: Store,
+  tokenId: string,
+  overrides: Partial<CreateVideoInput> & { bytes?: Uint8Array } = {},
+) {
+  const bytes = overrides.bytes ?? fixtureBytes("video-h264-aac.mp4");
+  const { bytes: _ignored, ...rest } = overrides;
+  return store.createVideoArtifact({
+    tokenId,
+    title: "clip",
+    ttlSeconds: 3 * DAY,
+    filename: "clip.mp4",
+    contentLength: bytes.byteLength,
+    maxDurationMs: VIDEO_MAX_DURATION_MS,
+    body: streamOf(bytes),
+    ...rest,
+  });
 }
 
 async function makeToken(store: Store, name = `tok-${crypto.randomUUID()}`) {
@@ -574,5 +645,467 @@ describe("reader comments (store)", () => {
     const artHit = await store.checkCommentRateLimit("ipB", art.id, 5, 2);
     expect(artHit.allowed).toBe(false);
     expect(artHit.scope).toBe("artifact");
+  });
+});
+
+describe("video artifacts", () => {
+  it("creates a video artifact: primary blob, kind=video, versions row, video_versions row", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const bytes = fixtureBytes("video-h264-aac.mp4");
+    const dirtyName = "../../evil name!!.MOV";
+    const art = await store.createVideoArtifact({
+      tokenId: tok.id,
+      title: "Demo",
+      ttlSeconds: 3 * DAY,
+      filename: dirtyName,
+      contentLength: bytes.byteLength,
+      maxDurationMs: VIDEO_MAX_DURATION_MS,
+      body: streamOf(bytes),
+    });
+
+    expect(art.kind).toBe("video");
+    expect(art.currentVersion).toBe(1);
+    expect(art.contentType).toBe("video/mp4");
+    expect(art.sizeBytes).toBe(bytes.byteLength);
+    expect(art.title).toBe("Demo");
+    expect(art.video.filename).toBe(sanitizeVideoFilename(dirtyName));
+    expect(art.video.durationMs).toBe(1000);
+    expect(art.video.width).toBe(320);
+    expect(art.video.height).toBe(180);
+    expect(art.video.videoCodec).toBe("h264");
+    expect(art.video.audioCodec).toBe("aac");
+    expect(art.video.posterR2Key).toBeNull();
+
+    const stored = await env.BLOBS.get(`artifacts/${art.id}/v1`);
+    expect(stored).not.toBeNull();
+    expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(bytes);
+
+    const versionRow = await env.DB.prepare(
+      "SELECT r2_key, content_type, size_bytes FROM versions WHERE artifact_id = ?1 AND version = 1",
+    )
+      .bind(art.id)
+      .first<{ r2_key: string; content_type: string; size_bytes: number }>();
+    expect(versionRow).toMatchObject({
+      r2_key: `artifacts/${art.id}/v1`,
+      content_type: "video/mp4",
+      size_bytes: bytes.byteLength,
+    });
+  });
+
+  it("addVideoVersion increments the version and always resets expiry from upload time", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id, { ttlSeconds: DAY });
+    const bytes2 = fixtureBytes("video-h264-silent.mp4");
+
+    const before = Date.now();
+    const v2 = await store.addVideoVersion(art.id, {
+      ttlSeconds: 3 * DAY,
+      filename: "clip2.mp4",
+      contentLength: bytes2.byteLength,
+      maxDurationMs: VIDEO_MAX_DURATION_MS,
+      body: streamOf(bytes2),
+    });
+
+    expect(v2.currentVersion).toBe(2);
+    expect(v2.video.audioCodec).toBeNull(); // silent fixture
+    const expiresAtMs = new Date(v2.expiresAt).getTime();
+    expect(expiresAtMs).toBeGreaterThanOrEqual(before + 3 * DAY * 1000 - 5000);
+    expect(expiresAtMs).toBeLessThanOrEqual(before + 3 * DAY * 1000 + 5000);
+
+    const content = await env.BLOBS.get(`artifacts/${art.id}/v2`);
+    expect(new Uint8Array(await content!.arrayBuffer())).toEqual(bytes2);
+  });
+
+  it("reactivates an expired, non-deleted video on a new version; its already-purged v1 stays unavailable", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id, { ttlSeconds: -3600 }); // already expired at creation
+
+    await store.cleanupExpired();
+    expect((await store.getArtifact(art.id))?.artifact.status).toBe("expired");
+    expect(await env.BLOBS.get(`artifacts/${art.id}/v1`)).toBeNull(); // purged immediately, no grace
+
+    const bytes2 = fixtureBytes("video-h264-silent.mp4");
+    const v2 = await store.addVideoVersion(art.id, {
+      ttlSeconds: 3 * DAY,
+      filename: "clip2.mp4",
+      contentLength: bytes2.byteLength,
+      maxDurationMs: VIDEO_MAX_DURATION_MS,
+      body: streamOf(bytes2),
+    });
+
+    expect(v2.status).toBe("active");
+    expect(v2.currentVersion).toBe(2);
+    expect(await env.BLOBS.get(`artifacts/${art.id}/v2`)).not.toBeNull();
+    expect(await env.BLOBS.get(`artifacts/${art.id}/v1`)).toBeNull(); // not restored
+  });
+
+  it("throws kind_mismatch for cross-kind version updates in both directions", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const doc = await makeArtifact(store, tok.id);
+    const bytes = fixtureBytes("video-h264-aac.mp4");
+
+    await expect(
+      store.addVideoVersion(doc.id, {
+        ttlSeconds: DAY,
+        filename: "x.mp4",
+        contentLength: bytes.byteLength,
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(bytes),
+      }),
+    ).rejects.toMatchObject({ code: "kind_mismatch" });
+
+    const video = await makeVideoArtifact(store, tok.id);
+    await expect(
+      store.addVersion(video.id, { contentType: "text/html", body: HTML, defaultTtlSeconds: DAY }),
+    ).rejects.toMatchObject({ code: "kind_mismatch" });
+  });
+
+  it("accepts a sniffed JPEG/PNG poster, records its key, and replaces it with a fresh key", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+    const posterKeyPrefix = `artifacts/${art.id}/v${art.currentVersion}/poster-`;
+
+    const jpegType = detectPosterImageType(JPEG_BYTES);
+    expect(jpegType).toBe("image/jpeg");
+    const accepted = await store.setVideoPoster(art.id, art.currentVersion, JPEG_BYTES, jpegType!);
+    expect(accepted.posterR2Key).toMatch(new RegExp(`^${posterKeyPrefix}`));
+    expect(accepted.posterContentType).toBe("image/jpeg");
+    expect(accepted.posterSizeBytes).toBe(JPEG_BYTES.byteLength);
+    const stored = await env.BLOBS.get(accepted.posterR2Key!);
+    expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(JPEG_BYTES);
+
+    const pngType = detectPosterImageType(PNG_BYTES);
+    expect(pngType).toBe("image/png");
+    const replaced = await store.setVideoPoster(art.id, art.currentVersion, PNG_BYTES, pngType!);
+    expect(replaced.posterR2Key).toMatch(new RegExp(`^${posterKeyPrefix}`));
+    expect(replaced.posterR2Key).not.toBe(accepted.posterR2Key); // fresh key per upload, not overwritten in place
+    expect(replaced.posterContentType).toBe("image/png");
+    expect(replaced.posterSizeBytes).toBe(PNG_BYTES.byteLength);
+    const storedAfter = await env.BLOBS.get(replaced.posterR2Key!);
+    expect(new Uint8Array(await storedAfter!.arrayBuffer())).toEqual(PNG_BYTES);
+    // The old poster blob is removed only once D1 durably points elsewhere.
+    expect(await env.BLOBS.get(accepted.posterR2Key!)).toBeNull();
+  });
+
+  it("rejects a poster whose bytes don't sniff to the declared type, and posters on document artifacts", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+
+    await expect(
+      store.setVideoPoster(art.id, art.currentVersion, new Uint8Array([1, 2, 3]), "image/jpeg"),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(
+      store.setVideoPoster(art.id, art.currentVersion, PNG_BYTES, "image/jpeg"),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+
+    const doc = await makeArtifact(store, tok.id);
+    await expect(store.setVideoPoster(doc.id, 1, JPEG_BYTES, "image/jpeg")).rejects.toMatchObject({
+      code: "kind_mismatch",
+    });
+  });
+
+  it("rejects a poster for a nonexistent version of an existing video artifact", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id); // only version 1 exists
+
+    await expect(store.setVideoPoster(art.id, 2, JPEG_BYTES, "image/jpeg")).rejects.toMatchObject({
+      code: "not_found",
+    });
+  });
+
+  it("a D1 failure on a first poster upload leaves no newly-orphaned R2 object", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+    const jpegType = detectPosterImageType(JPEG_BYTES)!;
+    const posterKeyPrefix = `artifacts/${art.id}/v${art.currentVersion}/poster-`;
+
+    // Force only the metadata UPDATE to fail (not the SELECT setVideoPoster
+    // already runs to load the existing row, nor the R2 put) via a genuine
+    // BEFORE UPDATE trigger that aborts — a real D1/SQLite failure, not a mock.
+    await env.DB.prepare(
+      "CREATE TRIGGER poster_update_guard BEFORE UPDATE ON video_versions BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+    ).run();
+    try {
+      await expect(store.setVideoPoster(art.id, art.currentVersion, JPEG_BYTES, jpegType)).rejects.toThrow();
+    } finally {
+      await env.DB.prepare("DROP TRIGGER poster_update_guard").run();
+    }
+
+    // No prior poster existed, so the newly-written (now unreferenceable)
+    // blob must have been cleaned up rather than left as an orphan. There's
+    // no key to check by exact name (the failed UPDATE never committed one to
+    // D1), so scan for anything left under this version's poster prefix.
+    const listing = await env.BLOBS.list({ prefix: posterKeyPrefix });
+    expect(listing.objects).toHaveLength(0);
+    expect((await store.getVideoVersion(art.id, art.currentVersion))?.posterR2Key).toBeNull();
+  });
+
+  it("a D1 failure on a poster replace leaves the OLD poster's bytes and metadata fully intact and deletes only the new key", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+    const jpegType = detectPosterImageType(JPEG_BYTES)!;
+    const pngType = detectPosterImageType(PNG_BYTES)!;
+
+    const original = await store.setVideoPoster(art.id, art.currentVersion, JPEG_BYTES, jpegType);
+    const originalKey = original.posterR2Key!;
+
+    await env.DB.prepare(
+      "CREATE TRIGGER poster_update_guard BEFORE UPDATE ON video_versions BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+    ).run();
+    try {
+      await expect(store.setVideoPoster(art.id, art.currentVersion, PNG_BYTES, pngType)).rejects.toThrow();
+    } finally {
+      await env.DB.prepare("DROP TRIGGER poster_update_guard").run();
+    }
+
+    // The old poster's blob and D1 metadata must be completely untouched —
+    // no silent three-way mismatch between R2 bytes, R2 httpMetadata, and D1.
+    const afterFailure = await store.getVideoVersion(art.id, art.currentVersion);
+    expect(afterFailure?.posterR2Key).toBe(originalKey);
+    expect(afterFailure?.posterContentType).toBe("image/jpeg");
+    expect(afterFailure?.posterSizeBytes).toBe(JPEG_BYTES.byteLength);
+    const stillStored = await env.BLOBS.get(originalKey);
+    expect(new Uint8Array(await stillStored!.arrayBuffer())).toEqual(JPEG_BYTES);
+
+    // Only the new (never-committed) key was written for this attempt, and it
+    // must be gone — scan the version's poster prefix for anything besides
+    // the original key.
+    const posterKeyPrefix = `artifacts/${art.id}/v${art.currentVersion}/poster-`;
+    const listing = await env.BLOBS.list({ prefix: posterKeyPrefix });
+    expect(listing.objects.map((o) => o.key)).toEqual([originalKey]);
+  });
+
+  it("delete purges both the MP4 and poster blobs", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+    const jpegType = detectPosterImageType(JPEG_BYTES)!;
+    const withPoster = await store.setVideoPoster(art.id, art.currentVersion, JPEG_BYTES, jpegType);
+
+    await store.deleteArtifact(art.id);
+
+    expect(await env.BLOBS.get(`artifacts/${art.id}/v1`)).toBeNull();
+    expect(await env.BLOBS.get(withPoster.posterR2Key!)).toBeNull();
+  });
+
+  it("cleanup purges an expired video's blobs immediately, but keeps a recently expired document's blob", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const video = await makeVideoArtifact(store, tok.id, { ttlSeconds: -60 });
+    const doc = await makeArtifact(store, tok.id, { ttlSeconds: -60 });
+
+    await store.cleanupExpired();
+
+    expect(await env.BLOBS.get(`artifacts/${video.id}/v1`)).toBeNull();
+    expect(await env.BLOBS.get(`artifacts/${doc.id}/v1`)).not.toBeNull();
+  });
+
+  it("rejects and deletes the object when the stored size doesn't match the declared content length", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const bytes = fixtureBytes("video-h264-aac.mp4");
+
+    await expect(
+      store.createVideoArtifact({
+        tokenId: tok.id,
+        title: null,
+        ttlSeconds: DAY,
+        filename: "x.mp4",
+        contentLength: bytes.byteLength + 10, // lies about the size
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(bytes),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+
+    const { results } = await env.DB.prepare("SELECT id FROM artifacts WHERE token_id = ?1").bind(tok.id).all();
+    expect(results).toHaveLength(0);
+    const listing = await env.BLOBS.list({ prefix: "artifacts/" });
+    expect(listing.objects).toHaveLength(0);
+  });
+
+  it("rejects and deletes the object when the declared content length is smaller than the actual stored size", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const bytes = fixtureBytes("video-h264-aac.mp4");
+
+    await expect(
+      store.createVideoArtifact({
+        tokenId: tok.id,
+        title: null,
+        ttlSeconds: DAY,
+        filename: "x.mp4",
+        contentLength: bytes.byteLength - 10, // understates the size
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(bytes),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+
+    const { results } = await env.DB.prepare("SELECT id FROM artifacts WHERE token_id = ?1").bind(tok.id).all();
+    expect(results).toHaveLength(0);
+    const listing = await env.BLOBS.list({ prefix: "artifacts/" });
+    expect(listing.objects).toHaveLength(0);
+  });
+
+  it("rejects and deletes a zero-byte upload (stored size must be positive)", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+
+    await expect(
+      store.createVideoArtifact({
+        tokenId: tok.id,
+        title: null,
+        ttlSeconds: DAY,
+        filename: "empty.mp4",
+        contentLength: 0,
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(new Uint8Array(0)),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+
+    const { results } = await env.DB.prepare("SELECT id FROM artifacts WHERE token_id = ?1").bind(tok.id).all();
+    expect(results).toHaveLength(0);
+    const listing = await env.BLOBS.list({ prefix: "artifacts/" });
+    expect(listing.objects).toHaveLength(0);
+  });
+
+  it("rejects and deletes a stored object that exceeds the 100,000,000-byte hard cap, even when it matches the declared length", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const size = 100_000_001; // one byte over the cap
+
+    await expect(
+      store.createVideoArtifact({
+        tokenId: tok.id,
+        title: null,
+        ttlSeconds: DAY,
+        filename: "big.mp4",
+        contentLength: size,
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: fixedLengthStream(size),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+
+    const { results } = await env.DB.prepare("SELECT id FROM artifacts WHERE token_id = ?1").bind(tok.id).all();
+    expect(results).toHaveLength(0);
+    const listing = await env.BLOBS.list({ prefix: "artifacts/" });
+    expect(listing.objects).toHaveLength(0);
+  }, 30_000);
+
+  it("a parser failure (not a valid MP4) leaves no R2 object and creates nothing", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const bytes = new TextEncoder().encode("this is not an mp4 container at all, just text bytes");
+
+    await expect(
+      store.createVideoArtifact({
+        tokenId: tok.id,
+        title: null,
+        ttlSeconds: DAY,
+        filename: "x.mp4",
+        contentLength: bytes.byteLength,
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(bytes),
+      }),
+    ).rejects.toThrow();
+
+    const listing = await env.BLOBS.list({ prefix: "artifacts/" });
+    expect(listing.objects).toHaveLength(0);
+  });
+
+  it("a D1 batch failure leaves no R2 object and the artifact unchanged", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id); // v1
+
+    // Simulate a race/corruption: a `versions` row already occupies (id, 2),
+    // so addVideoVersion's own insert for version 2 collides on the primary key.
+    await env.DB.prepare(
+      "INSERT INTO versions (artifact_id, version, r2_key, content_type, size_bytes, created_at) VALUES (?1, 2, 'bogus', 'text/plain', 1, ?2)",
+    )
+      .bind(art.id, new Date().toISOString())
+      .run();
+
+    const bytes2 = fixtureBytes("video-h264-silent.mp4");
+    await expect(
+      store.addVideoVersion(art.id, {
+        ttlSeconds: DAY,
+        filename: "y.mp4",
+        contentLength: bytes2.byteLength,
+        maxDurationMs: VIDEO_MAX_DURATION_MS,
+        body: streamOf(bytes2),
+      }),
+    ).rejects.toThrow();
+
+    expect(await env.BLOBS.get(`artifacts/${art.id}/v2`)).toBeNull();
+    expect((await store.getArtifact(art.id))?.artifact.currentVersion).toBe(1);
+  });
+});
+
+describe("auditOrphanVideoBlobs", () => {
+  it("deletes only unreferenced, stale primary/poster keys, ignores non-matching shapes, and progresses its cursor", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const video = await makeVideoArtifact(store, tok.id);
+    const doc = await makeArtifact(store, tok.id);
+    const jpegType = detectPosterImageType(JPEG_BYTES)!;
+    const realPoster = await store.setVideoPoster(video.id, video.currentVersion, JPEG_BYTES, jpegType);
+
+    await env.BLOBS.put("artifacts/orphanA/v1", new Uint8Array([1]));
+    // Unreferenced synthetic poster using the real (suffixed) key shape.
+    await env.BLOBS.put("artifacts/orphanB/v1/poster-deadbeef", new Uint8Array([2]));
+    // Not a primary/poster key shape — must survive even though unreferenced.
+    await env.BLOBS.put("artifacts/orphanC/assets/deadbeef", new Uint8Array([3]));
+
+    const future = new Date(Date.now() + 2 * 3600_000); // pretend >1h has passed
+
+    const first = await store.auditOrphanVideoBlobs(1, future);
+    const row1 = await env.DB.prepare("SELECT cursor FROM cleanup_state WHERE name = 'orphan_video_blobs'").first<{
+      cursor: string | null;
+    }>();
+    expect(first.scanned).toBe(1);
+    expect(row1?.cursor).toBeTruthy();
+
+    const second = await store.auditOrphanVideoBlobs(1, future);
+    const row2 = await env.DB.prepare("SELECT cursor FROM cleanup_state WHERE name = 'orphan_video_blobs'").first<{
+      cursor: string | null;
+    }>();
+    expect(second.scanned).toBe(1);
+    expect(row2?.cursor).not.toBe(row1?.cursor); // cursor advanced, not stuck rescanning page one
+
+    // Keep sweeping (bucket has 6 objects total) until fully covered.
+    let totalScanned = first.scanned + second.scanned;
+    for (let i = 0; i < 10 && totalScanned < 6; i++) {
+      const r = await store.auditOrphanVideoBlobs(1, future);
+      totalScanned += r.scanned;
+      if (r.scanned === 0) break;
+    }
+    expect(totalScanned).toBe(6);
+
+    expect(await env.BLOBS.get("artifacts/orphanA/v1")).toBeNull();
+    expect(await env.BLOBS.get("artifacts/orphanB/v1/poster-deadbeef")).toBeNull();
+    expect(await env.BLOBS.get("artifacts/orphanC/assets/deadbeef")).not.toBeNull();
+    expect(await env.BLOBS.get(`artifacts/${video.id}/v1`)).not.toBeNull();
+    expect(await env.BLOBS.get(`artifacts/${doc.id}/v1`)).not.toBeNull();
+    // A referenced poster (matches the same key shape as the deleted orphan)
+    // must survive the sweep too.
+    expect(await env.BLOBS.get(realPoster.posterR2Key!)).not.toBeNull();
+  });
+
+  it("leaves a freshly written orphan blob alone until it is older than one hour", async () => {
+    const store = makeStore();
+    await env.BLOBS.put("artifacts/freshOrphan/v1", new Uint8Array([9]));
+
+    const result = await store.auditOrphanVideoBlobs(100); // real "now": object is only moments old
+    expect(result.deleted).toBe(0);
+    expect(await env.BLOBS.get("artifacts/freshOrphan/v1")).not.toBeNull();
   });
 });
