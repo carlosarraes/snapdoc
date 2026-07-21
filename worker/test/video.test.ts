@@ -18,7 +18,8 @@ type FixtureName =
   | "video-vp9.mp4"
   | "video-audio-only.mp4"
   | "video-h264-opus.mp4"
-  | "video-h264-dual-audio.mp4";
+  | "video-h264-dual-audio.mp4"
+  | "video-h264-zero-duration.mp4";
 
 function fixtureBytes(name: FixtureName): Uint8Array {
   switch (name) {
@@ -34,6 +35,8 @@ function fixtureBytes(name: FixtureName): Uint8Array {
       return decodeBase64(env.FIXTURE_VIDEO_H264_OPUS_B64);
     case "video-h264-dual-audio.mp4":
       return decodeBase64(env.FIXTURE_VIDEO_H264_DUAL_AUDIO_B64);
+    case "video-h264-zero-duration.mp4":
+      return decodeBase64(env.FIXTURE_VIDEO_ZERO_DURATION_B64);
   }
 }
 
@@ -170,6 +173,15 @@ describe("inspectMp4", () => {
   it("accepts a duration exactly at the supplied limit", async () => {
     await expect(inspectFile("video-h264-silent.mp4", 1000)).resolves.toMatchObject({
       durationMs: 1000,
+    });
+  });
+
+  it("rejects a fragmented MP4 (empty moov, no mehd) whose mvhd reports zero duration", async () => {
+    // ffmpeg -movflags frag_keyframe+empty_moov leaves mvhd.duration at 0
+    // (the real duration lives in the moof/mdat fragments this scanner never
+    // reads), which would otherwise sail under any positive maxDurationMs cap.
+    await expect(inspectFile("video-h264-zero-duration.mp4")).rejects.toMatchObject({
+      code: "invalid_video",
     });
   });
 

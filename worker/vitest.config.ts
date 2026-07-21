@@ -31,6 +31,7 @@ export default defineWorkersConfig({
             FIXTURE_VIDEO_AUDIO_ONLY_B64: fixtureBase64("video-audio-only.mp4"),
             FIXTURE_VIDEO_H264_OPUS_B64: fixtureBase64("video-h264-opus.mp4"),
             FIXTURE_VIDEO_H264_DUAL_AUDIO_B64: fixtureBase64("video-h264-dual-audio.mp4"),
+            FIXTURE_VIDEO_ZERO_DURATION_B64: fixtureBase64("video-h264-zero-duration.mp4"),
           },
         },
       },

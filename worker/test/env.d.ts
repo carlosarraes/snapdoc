@@ -9,5 +9,6 @@ declare module "cloudflare:test" {
     FIXTURE_VIDEO_AUDIO_ONLY_B64: string;
     FIXTURE_VIDEO_H264_OPUS_B64: string;
     FIXTURE_VIDEO_H264_DUAL_AUDIO_B64: string;
+    FIXTURE_VIDEO_ZERO_DURATION_B64: string;
   }
 }

@@ -203,6 +203,11 @@ function toVideoMetadata(info: Movie, maxDurationMs: number): VideoMetadata {
   if (!Number.isFinite(rawDurationMs)) {
     throw new VideoValidationError("invalid_video", "video duration is not finite");
   }
+  // A fragmented MP4 (moov+mvex, no mehd) reports a zero mvhd duration, which
+  // would otherwise sail under any positive cap — reject it outright.
+  if (rawDurationMs <= 0) {
+    throw new VideoValidationError("invalid_video", "video duration must be positive");
+  }
   if (rawDurationMs > maxDurationMs) {
     throw new VideoValidationError("video_too_long", `video duration ${rawDurationMs}ms exceeds limit ${maxDurationMs}ms`);
   }
