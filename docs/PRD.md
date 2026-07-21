@@ -166,6 +166,47 @@ Refines the v1 "self-contained, no separate asset uploads" stance for the common
 - Raster formats only (png/jpeg/gif/webp/avif); SVG is rejected to avoid script-in-SVG XSS via direct navigation to an asset URL. Limits: ≤5 MB/image, ≤20 images, ≤25 MB bundle; the document stays ≤2 MB.
 - Agent discoverability: `publish --help` documents the behavior, and a `snapdoc llm` command prints a compact, agent-oriented guide to the whole CLI.
 
+## Video Artifacts (first-class, delivered)
+
+snapdoc hosts MP4 recordings (QA evidence, walkthroughs, bug repros) as their
+own first-class artifact `kind`, alongside — not embedded inside — HTML/Markdown
+documents. This is a separate publish path with its own limits, TTL, and
+serving behavior, not a document feature.
+
+- A video artifact is created by `POST /v1/artifacts` (or versioned by
+  `POST /v1/artifacts/{id}/versions`) with `Content-Type: video/mp4`; an
+  artifact's `kind` (`document` or `video`) is fixed for its lifetime —
+  publishing the wrong kind onto an existing artifact is rejected
+  (`kind_mismatch`).
+- Accepted format: MP4 container, H.264 video (`avc1`/`avc3`), optional AAC
+  audio. Limits: ≤100,000,000 bytes (`Content-Length` required, checked before
+  any byte streams), ≤600 seconds (10 minutes). TTL defaults to 3 days (bounds
+  1h–7d, narrower than a document's 14-day default/90-day max), reset on every
+  new version. Metadata (duration, dimensions, codecs) is derived server-side
+  by bounded MP4 inspection — never a full-file parse — and returned as
+  additive JSON fields (`duration_ms`, `width`, `height`, `video_codec`,
+  `audio_codec`) alongside a stable `file_url`/`poster_url`.
+- Serving supports HTTP byte-range requests (`206`/`416`, `HEAD`) so browsers
+  can seek without downloading the whole file, a server-rendered watch page
+  (`/{id}`, `/{id}/v/{n}`) with a native `<video>` player, and an optional
+  poster image (`PUT .../poster`, sniffed JPEG/PNG, ≤5 MiB). Video blobs are
+  purged immediately on expiry (no grace period, unlike a document's), because
+  they are much larger; an hourly cron audits for orphaned video blobs.
+  Passcode protection extends to the media/poster routes themselves (not just
+  the watch page), at the cost of cross-origin embedding — the file/media URL
+  of a protected video is not fetchable by a forge (GitHub/GitLab) the way an
+  unprotected one is.
+- The CLI auto-detects an `.mp4` file argument, runs a local preflight before
+  uploading, and supports a poster-only retry (`--update <id> --poster <img>`
+  with no file argument) so a failed poster upload never requires
+  re-publishing the video. `snapdoc llm` documents the whole flow for agents.
+- Reader comments (line/text-anchored feedback) remain document-only; a video
+  publish rejects `comments=1`.
+- **Explicitly deferred**: embedding a video *inside* an HTML/Markdown
+  document (e.g. an uploaded `<video>` referenced like a hosted image) is out
+  of scope. Video is its own artifact kind with its own URL, not an asset type
+  a document can reference the way it can reference images today.
+
 ## Testing Decisions
 
 - Good tests should verify externally observable behavior rather than implementation details. For example, tests should assert that publishing returns a URL, creates metadata, stores content, and serves the artifact with correct access behavior; they should not assert private helper calls or database query shapes.
@@ -189,6 +230,7 @@ Refines the v1 "self-contained, no separate asset uploads" stance for the common
 - Browser extensions.
 - Multi-file site hosting or directory deploys.
 - Standalone asset upload / general media library (referenced-image bundling exists — see Image Hosting).
+- Video embedded *inside* an HTML/Markdown document (deferred — see Video Artifacts; first-class standalone video artifacts are delivered).
 - Visual HTML editing.
 - ~~Inline comments.~~ Delivered: reader comments anchor to a text selection via a public review page (owner opt-in per artifact).
 - ~~Agent-readable comment resolution.~~ Delivered: `snapdoc comments <id>` surfaces reader feedback with its quoted context for the next iteration.

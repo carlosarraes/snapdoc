@@ -29,6 +29,13 @@ server-side.
 | Min TTL | 1 hour |
 | Max TTL | 90 days |
 | Publish rate limit | 100 publishes/hour/token |
+| Max video size | 100,000,000 bytes (Content-Length required, checked before any byte is streamed) |
+| Max video duration | 600 seconds (10 minutes) |
+| Allowed video format | MP4 container, H.264 video (`avc1`/`avc3`), optional AAC audio |
+| Default video TTL | 3 days |
+| Min video TTL | 1 hour |
+| Max video TTL | 7 days |
+| Max poster size | 5 MB (5,242,880 bytes), sniffed JPEG or PNG |
 
 ## Error envelope
 
@@ -55,19 +62,31 @@ Stable error codes (clients must switch on `code`, never on `message`):
 | 401 | `passcode_required` | Content read of a passcode-protected artifact without `X-Snapdoc-Passcode` |
 | 401 | `passcode_incorrect` | Wrong passcode for a protected artifact |
 | 403 | `comments_disabled` | Reader comment on an artifact whose owner has not enabled comments |
+| 400 | `kind_mismatch` | Posting a document version onto a video artifact (or vice versa), or a poster upload against a document artifact |
+| 400 | `invalid_video` | Upload is not a well-formed MP4 (missing/malformed `ftyp`/`moov`, wrong track counts, etc.) |
+| 400 | `unsupported_video_codec` | Video or audio codec is not H.264 (`avc1`/`avc3`) / AAC |
+| 400 | `video_too_long` | Video duration exceeds the 600-second (10 minute) limit |
 | 404 | `not_found` | Unknown artifact/version/token id |
 | 409 | `not_active` | Update/expire on a deleted artifact |
 | 410 | `gone` | Content read of an expired or deleted artifact |
-| 413 | `too_large` | Document exceeds 2 MB, an image exceeds 5 MB, or the bundle exceeds 25 MB |
+| 413 | `too_large` | Document exceeds 2 MB, an image exceeds 5 MB, the bundle exceeds 25 MB, a video exceeds 100,000,000 bytes, or a poster exceeds 5 MB |
+| 416 | `range_not_satisfiable` | Video `Range:` header does not describe a satisfiable byte range |
 | 429 | `rate_limited` | Over 100 publishes/hr, or reader comments over the per-IP/per-artifact cap; honors `Retry-After` |
 | 500 | `internal` | Unexpected server error |
 | 503 | `misconfigured` | Admin auth misconfigured server-side (e.g. Access env vars missing in production); admin routes fail closed |
+
+Video error messages are stable strings that never leak MP4 parser internals
+(box names, codec strings, mp4box error text): `invalid_video` always reads
+"The uploaded file is not a valid MP4 video.", `unsupported_video_codec` always
+reads "The video must be H.264 with optional AAC audio.", and `video_too_long`
+always reads "The video duration exceeds the maximum of 10 minutes."
 
 ## Artifact object
 
 ```json
 {
   "id": "x7Kp9qWm2AbCdE",
+  "kind": "document",
   "url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE",
   "title": "Q3 plan review",
   "status": "active",
@@ -82,10 +101,48 @@ Stable error codes (clients must switch on `code`, never on `message`):
 }
 ```
 
-`status` ∈ `active | expired | deleted`. `has_passcode` is true when the artifact
-is passcode-protected. `comments_enabled` is true when the owner has opted the
-artifact into public reader comments (see the review page below); it is mutually
-exclusive with `has_passcode`. `token_name` appears only in admin responses.
+`status` ∈ `active | expired | deleted`. `kind` ∈ `document | video` (see
+[Video artifacts](#video-artifacts) below). `has_passcode` is true when the
+artifact is passcode-protected. `comments_enabled` is true when the owner has
+opted the artifact into public reader comments (see the review page below); it
+is mutually exclusive with `has_passcode` and never true for a video (reader
+comments are document-only). `token_name` appears only in admin responses.
+
+**Video artifacts** carry every field above plus additive fields — never a
+different shape, so a client that only understands documents can ignore them:
+
+```json
+{
+  "id": "x7Kp9qWm2AbCdE",
+  "kind": "video",
+  "url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE",
+  "file_url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/media/checkout-flow.mp4",
+  "version_url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/v/1",
+  "version_file_url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/v/1/media/checkout-flow.mp4",
+  "poster_url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/poster.jpg",
+  "version_poster_url": "https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE/v/1/poster.jpg",
+  "title": "QA clip",
+  "status": "active",
+  "current_version": 1,
+  "content_type": "video/mp4",
+  "size_bytes": 4213880,
+  "duration_ms": 42300,
+  "width": 1920,
+  "height": 1080,
+  "video_codec": "h264",
+  "audio_codec": "aac",
+  "created_at": "2026-06-12T15:04:05Z",
+  "expires_at": "2026-06-15T15:04:05Z",
+  "has_passcode": false,
+  "comments_enabled": false
+}
+```
+
+`file_url`/`poster_url` always point at the *current* version; `version_url`/
+`version_file_url`/`version_poster_url` are pinned to `current_version` at
+response time (the `versions[]` entries below carry their own version-pinned
+counterparts). `poster_url`/`version_poster_url` are `null` until a poster is
+uploaded. `audio_codec` is `null` for a video with no audio track.
 
 ## Publisher endpoints (Bearer token)
 
@@ -149,6 +206,37 @@ body. The 201 response is the Artifact object plus an additive `unresolved_refs`
 array, e.g. `{ ...artifact, "unresolved_refs": ["logo.png"] }`. The raw-body form
 (no images) is unchanged.
 
+<a id="video-artifacts"></a>
+
+**Publishing a video (`video/mp4`).** Send `Content-Type: video/mp4` instead of
+a document body:
+
+- `Content-Length` is **required** and checked against the 100,000,000-byte cap
+  before a single byte streams — an oversize declared length is rejected
+  (`too_large`) without ever touching R2. The body itself streams straight to
+  storage; it is never buffered whole.
+- The upload must be a well-formed MP4 with exactly one H.264 (`avc1`/`avc3`)
+  video track and at most one AAC audio track, duration ≤600s (10 minutes).
+  A malformed file is `invalid_video`; a disallowed codec is
+  `unsupported_video_codec`; an overlong video is `video_too_long`. All three
+  return stable, parser-detail-free messages (see the error table above).
+- Query params:
+  - `title` (optional, ≤200 chars)
+  - `ttl` (optional, duration string `1h`–`7d`; default `3d` — the video TTL
+    bounds and default differ from the document ones above)
+  - `filename` (optional) — sanitized server-side (path stripped, unsafe
+    characters replaced, `.mp4` extension forced, stem capped at 80 chars) and
+    used to build `file_url`; omitted or empty falls back to `recording.mp4`.
+  - `comments` — **rejected** (`invalid_request`) if `1`: reader comments
+    anchor to text and are document-only. Video publishes never set
+    `comments_enabled`.
+- Headers: `X-Snapdoc-Passcode` (optional, create only) works exactly as for a
+  document — see the passcode limitation for video media under
+  [Serving behavior](#serving-behavior) below.
+- 201 → Video artifact object (version 1), including `file_url`, `version_url`,
+  `version_file_url`, `poster_url`/`version_poster_url` (`null` until a poster
+  is uploaded), `duration_ms`, `width`, `height`, `video_codec`, `audio_codec`.
+
 ### POST /v1/artifacts/{id}/versions — publish new version (update)
 
 - Same body/params as publish, including the `multipart/form-data` form for
@@ -158,6 +246,32 @@ array, e.g. `{ ...artifact, "unresolved_refs": ["logo.png"] }`. The raw-body for
 - Only the active artifact can be updated; token need not be the original creator (single-team trust model).
 - 201 → Artifact object with incremented `current_version`.
 - 404 `not_found`, 409 `not_active` if deleted. Updating an `expired` artifact reactivates it with the new version.
+- **Video**: same `video/mp4` publish as above, applied as a new version of an
+  existing video artifact. Expiry always resets from upload time (default `3d`
+  unless `ttl` is given, same 1h–7d bounds); `X-Snapdoc-Passcode` is ignored on
+  a version update, matching documents. Posting a video body onto a document
+  artifact (or a document body onto a video artifact) is `kind_mismatch` (400)
+  — an artifact's `kind` is fixed for its lifetime.
+
+### PUT /v1/artifacts/{id}/versions/{version}/poster — upload/replace a poster
+
+- Video-only: `kind_mismatch` (400) against a document artifact.
+- Body: raw image bytes. `Content-Type: image/jpeg` or `image/png` (no other
+  type accepted); `Content-Length` required and checked against the
+  5,242,880-byte cap before the body is read. The declared length and the
+  actual uploaded size must match (`invalid_request` otherwise).
+- The bytes are content-sniffed server-side and must match the declared
+  `Content-Type`, else `invalid_request` — a mismatched or corrupt image never
+  gets a URL.
+- Replacing an existing poster with a different format changes its extension
+  (`poster.jpg` ↔ `poster.png`); the old poster object is replaced, not kept
+  alongside.
+- 404 `not_found` if the artifact or that version doesn't exist.
+- 200 → the version entry (see `versions[]` under `GET /v1/artifacts/{id}`
+  below) with its `version_poster_url` set. If `{version}` is the artifact's
+  `current_version`, the response also includes the refreshed stable `url`,
+  `file_url`, and `poster_url` (the non-versioned URLs move with whichever
+  version is current).
 
 ### GET /v1/artifacts — list own artifacts
 
@@ -190,6 +304,14 @@ array, e.g. `{ ...artifact, "unresolved_refs": ["logo.png"] }`. The raw-body for
 
 `assets` lists every hosted image across the artifact's versions (content-addressed,
 so shared across versions). It is `[]` when the artifact has no images.
+
+**Video**: each `versions[]` entry additionally carries `kind: "video"`,
+`version_url`, `version_file_url`, `version_poster_url` (`null` until that
+version has a poster), `duration_ms`, `width`, `height`, `video_codec`,
+`audio_codec` — the same per-version metadata the version was published with.
+Document entries carry only the base fields shown above plus `kind: "document"`.
+`assets` is always `[]` for a video artifact (video files are not asset-hosted
+images).
 
 ### GET /v1/artifacts/{id}/comments — read comments (the agent loop)
 
@@ -267,6 +389,9 @@ so shared across versions). It is `[]` when the artifact has no images.
   is visible. Reconstructed Markdown is best-effort and not guaranteed identical to
   the author's original (only rendered HTML is stored). 404 `not_found` (unknown
   artifact/version); 410 `gone` (expired/deleted).
+- **Video artifacts have no text content** — this endpoint is document-only.
+  Calling it on a video artifact is `invalid_request`, pointing at the watch
+  page or file URL from the artifact metadata instead.
 
 ### POST /v1/artifacts/{id}/expire — expire now
 
@@ -359,15 +484,19 @@ and per-artifact.
   cookie (only the author's own comment; cascades to replies). A missing/mismatched
   cookie reads as 404 `not_found`.
 
+<a id="serving-behavior"></a>
+
 ## Serving behavior (snapdoc.carraes.dev) — for reference
 
 | Path | Behavior |
 |---|---|
 | `/` and non-ID paths | Static assets (landing) |
-| `/{id}` | 200 latest version HTML; 404 missing; 410 expired/deleted (distinct friendly pages) |
-| `/{id}/v/{n}` | Version-pinned; same state rules |
-| `/{id}?annotate=1` | Annotate variant (only when `comments_enabled`): same HTML with the review annotator injected and the CSP relaxed to allow framing by, and script loading from, the API host. Served `private, no-store`. The bare `/{id}` is byte-for-byte unchanged. Framed by the review page; a direct hit is a no-op. |
+| `/{id}` | 200 latest version HTML (document) or the video watch page (`kind: "video"`); 404 missing; 410 expired/deleted (distinct friendly pages) |
+| `/{id}/v/{n}` | Version-pinned; same state rules; renders that version's watch page for a video artifact |
+| `/{id}?annotate=1` | Annotate variant (only when `comments_enabled`, document artifacts only): same HTML with the review annotator injected and the CSP relaxed to allow framing by, and script loading from, the API host. Served `private, no-store`. The bare `/{id}` is byte-for-byte unchanged. Framed by the review page; a direct hit is a no-op. |
 | `/{id}/a/{sha256}` | Hosted image bytes; `Content-Type` from the stored type, `Cache-Control: public, max-age=31536000, immutable`, `nosniff`. Same status/passcode gate as the page (404 missing, 410 expired/deleted, 401 if locked). `/{id}/v/{n}/a/{sha256}` also accepted. |
+| `/{id}/media/{filename}.mp4` | Video byte-range streaming (see below). `/{id}/v/{n}/media/{filename}.mp4` also accepted. |
+| `/{id}/poster.{jpg\|png}` | Video poster image (whichever extension matches the sniffed upload). `/{id}/v/{n}/poster.{jpg\|png}` also accepted. |
 | `POST /{id}/unlock` | Passcode entry: form field `passcode`; 303 + viewer cookie on success, 401 unlock page on failure |
 
 Headers on artifact responses: `X-Robots-Tag: noindex, nofollow`,
@@ -380,6 +509,35 @@ carries a valid `sd_unlock_{id}` cookie. The cookie is an HMAC of the stored has
 set by `POST /{id}/unlock` (HttpOnly, Secure, SameSite=Lax, Path=`/{id}`, 12h).
 Protected content is served `Cache-Control: private, no-store` so shared caches
 never hold it.
+
+**Video media/poster serving.** `/{id}/media/{filename}.mp4` streams the raw
+MP4 bytes: `GET`/`HEAD` only (405 otherwise), `Accept-Ranges: bytes`, and a
+single `Range:` request honored per RFC 7233 subset — standard (`bytes=0-99`),
+open-ended (`bytes=100-`), and suffix (`bytes=-100`) forms all work. A
+satisfiable range answers `206` with `Content-Range: bytes {start}-{end}/{size}`
+and a body of exactly that length; no range answers `200` with the full body
+and `Content-Length`; an unsatisfiable range (out of bounds, reversed, or more
+than one range) answers `416` with `Content-Range: bytes */{size}` and no body.
+`HEAD` returns the same headers as the equivalent `GET` with an empty body.
+`{filename}` in the URL is presentation-only — it must match the stored
+version's filename exactly or the route 404s; it never selects storage
+directly. Posters (`/{id}/poster.{jpg|png}`) are served whole (no ranges) with
+their sniffed `Content-Type`. Cache-Control on unprotected video media/posters
+is `public, max-age={min(60, seconds until expiry)}` — bounded and never
+`immutable`, since the same URL keeps serving after a new version replaces it.
+
+**Passcode limitation for video.** Unlike a document (where only the HTML page
+is passcode-gated and content reads require the passcode header), a
+passcode-protected video's **media and poster routes** are also gated by the
+same `sd_unlock_{id}` cookie: a locked request gets a bare `401` (no page, no
+body) rather than the document's friendly unlock page, and once unlocked, media
+is served `Cache-Control: private, no-store` with **no**
+`Access-Control-Allow-Origin` header (unprotected video media/posters send
+`Access-Control-Allow-Origin: *` so GitHub/GitLab-style embedding works). This
+means a passcode-protected video's watch page requires unlocking in-browser
+first — the file/media URL is not intended for cross-origin `<video>`/`<img>`
+embedding in a forge (issue/PR) the way an unprotected video's is; share the
+watch page link instead.
 
 ## Versioning of this contract
 

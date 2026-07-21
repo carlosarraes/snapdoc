@@ -39,13 +39,19 @@ cat plan.md | snapdoc publish - --markdown --quiet
 # Read a shared doc's content straight to the terminal — Markdown by default
 # (fewer tokens than HTML, ideal for agents); --raw for the original HTML
 snapdoc read <id> > doc.md
+
+# Publish an MP4 recording (e.g. QA evidence) — prints a watch URL
+snapdoc publish recording.mp4 --title "ABC-123 QA @ a1b2c3d" --poster happy-path.jpg
+
+# Add a new version to the same watch URL
+snapdoc publish recording.mp4 --update <id>
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `publish [file]` | Publish HTML/Markdown from a file or stdin. Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--no-assets`, `--assets-base <dir>`, `--quiet/-q` |
+| `publish [file]` | Publish HTML/Markdown from a file or stdin, or an `.mp4` video (auto-detected). Flags: `--title`, `--ttl`, `--update <id>`, `--markdown`, `--passcode`, `--no-assets`, `--assets-base <dir>`, `--poster <img>` (video only), `--quiet/-q` |
 | `list` | List your artifacts. Flags: `--status`, `--all` |
 | `get <id>` | Show artifact metadata and version history |
 | `comments <id>` | Read feedback left on an artifact |
@@ -78,6 +84,19 @@ URLs — remote `https://` and `data:` refs are left untouched. Use `--assets-ba
 ≤5 MB/image, ≤20 images, ≤25 MB total; png/jpeg/gif/webp/avif (SVG unsupported).
 Run `snapdoc llm` for a compact, copy-pasteable guide aimed at agents.
 
+**Videos:** an `.mp4` file argument is auto-detected — `snapdoc publish
+recording.mp4` streams it with an exact `Content-Length` (never from stdin) and
+prints a watch page URL alongside the raw file URL. Limits: MP4 container,
+H.264 video with optional AAC audio, ≤100,000,000 bytes, ≤10 minutes; TTL
+1h–7d (default 3d, resets on each new version). `--poster <img>` attaches a
+JPEG/PNG (≤5 MiB) to the version just published, and can also be retried alone
+against an existing video (`--update <id> --poster <img>`, no file argument)
+without re-uploading the video. `--comments` is document-only and is rejected
+for a video. Videos are unlisted-public by default like documents, so
+forges (GitHub/GitLab) can render them inline from the file URL; a
+`--passcode`-protected video's media is not embeddable cross-origin, so share
+its watch page link instead. See [`API.md`](API.md) for the full contract.
+
 ## Configuration
 
 Resolved with precedence **flag > env > config file > default**.
@@ -89,9 +108,10 @@ Resolved with precedence **flag > env > config file > default**.
 | Default API | `https://api.snapdoc.carraes.dev` |
 
 Limits: 2 MB max document (plus ≤5 MB/image, ≤20 images, ≤25 MB bundle), 14-day
-default TTL (max 90 days), 100 publishes/hour per token. Artifacts are served
-from a cookie-free origin with `noindex, nofollow` and unguessable 14-character
-IDs.
+default TTL (max 90 days), 100 publishes/hour per token. Video: ≤100,000,000
+bytes, ≤10 minutes, H.264 + optional AAC, 3-day default TTL (1h–7d), ≤5 MiB
+poster. Artifacts are served from a cookie-free origin with `noindex, nofollow`
+and unguessable 14-character IDs.
 
 ## Architecture
 
