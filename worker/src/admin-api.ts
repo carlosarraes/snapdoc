@@ -201,7 +201,7 @@ export function createAdminApp(): Hono<AdminCtx> {
     const assets = await store.listAssets(found.artifact.id);
     return c.json({
       artifact: artifactJson(found.artifact, c.env, { admin: true }),
-      versions: found.versions.map(versionJson),
+      versions: found.versions.map((v) => versionJson(v)),
       assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
     });
   });

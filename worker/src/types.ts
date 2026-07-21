@@ -11,6 +11,11 @@ export interface Env {
   DEFAULT_TTL: string;
   MAX_TTL: string;
   MIN_TTL: string;
+  MAX_VIDEO_BYTES: string;
+  MAX_VIDEO_DURATION_SECONDS: string;
+  DEFAULT_VIDEO_TTL: string;
+  MAX_VIDEO_TTL: string;
+  MAX_POSTER_BYTES: string;
   RATE_LIMIT_PER_HOUR: string;
   COMMENT_RATE_LIMIT_PER_IP_PER_HOUR: string;
   COMMENT_RATE_LIMIT_PER_ARTIFACT_PER_HOUR: string;

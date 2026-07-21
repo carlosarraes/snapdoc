@@ -1,12 +1,30 @@
 // /v1/* publisher endpoints (Bearer token auth).
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { htmlToMarkdown } from "./html-to-markdown";
 import { ALLOWED_IMAGE_TYPES, detectImageType } from "./assets";
-import { Store, StoreError, type ArtifactStatus, type TokenRecord, type UploadAsset } from "./store";
-import { artifactJson, assetJson, commentJson, errorResponse, parseDuration, tokenJson, versionJson } from "./http";
+import {
+  Store,
+  StoreError,
+  type ArtifactStatus,
+  type TokenRecord,
+  type UploadAsset,
+  type VideoVersionMetadata,
+} from "./store";
+import {
+  artifactJson,
+  assetJson,
+  commentJson,
+  errorResponse,
+  parseDuration,
+  tokenJson,
+  versionJson,
+  videoFileUrl,
+  videoPosterUrl,
+} from "./http";
+import { VideoValidationError, type VideoValidationErrorCode } from "./video";
 import type { Env } from "./types";
 
 interface ApiVariables {
@@ -16,10 +34,40 @@ interface ApiVariables {
 
 export type ApiContext = { Bindings: Env; Variables: ApiVariables };
 
+// Stable, client-facing text for each VideoValidationError code. The
+// exception's own `message` (mp4box error text, box names/sizes, etc.) is
+// internal parser detail — useful in logs and in video.ts's own tests, but
+// never sent to a caller, per the brief's "without leaking parser internals."
+const VIDEO_VALIDATION_ERROR_MESSAGES: Record<VideoValidationErrorCode, string> = {
+  invalid_video: "The uploaded file is not a valid MP4 video.",
+  unsupported_video_codec: "The video must be H.264 with optional AAC audio.",
+  video_too_long: "The video duration exceeds the maximum of 10 minutes.",
+};
+
 export function mapStoreError(err: unknown): Response {
   if (err instanceof StoreError) return errorResponse(err.code, err.message);
+  // VideoValidationError is raised by the MP4 inspector deep inside
+  // Store.createVideoArtifact/addVideoVersion; it is not a StoreError, so it
+  // needs its own mapping here or an invalid upload would fall through to a
+  // generic 500 instead of a stable 400 error code.
+  if (err instanceof VideoValidationError) {
+    console.error("video validation error", err.message);
+    return errorResponse(err.code, VIDEO_VALIDATION_ERROR_MESSAGES[err.code]);
+  }
   console.error("internal error", err);
   return errorResponse("internal", "Unexpected server error.");
+}
+
+// Video artifacts are dispatched on this exact normalized Content-Type,
+// ahead of readPublishInput/multipart handling — never buffered whole like a
+// document body.
+const VIDEO_CONTENT_TYPE = "video/mp4";
+// Not independently configurable: the brief's binding list has a default and
+// max video TTL but no minimum, so the 1-hour floor is a fixed constant.
+const VIDEO_MIN_TTL_SECONDS = 3600;
+
+function normalizedContentType(request: Request): string {
+  return (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
 }
 
 interface PublishInput {
@@ -62,6 +110,86 @@ function validateTitleTtl(
   return { title, ttlSeconds, commentsEnabled };
 }
 
+interface VideoPublishInput {
+  title: string | null;
+  ttlSeconds: number;
+  filename: string;
+  contentLength: number;
+  passcode?: string;
+}
+
+// Validates ?title=, ?ttl=, and ?comments= for a video publish. Bounds differ
+// from the document path (video-specific default/min/max TTL) and comments
+// are rejected outright: line-anchored reader comments are document-only.
+function validateVideoTitleTtl(
+  env: Env,
+  query: { title?: string; ttl?: string; comments?: string },
+): { title: string | null; ttlSeconds: number } | Response {
+  const title = query.title ?? null;
+  if (title !== null && title.length > 200) {
+    return errorResponse("invalid_request", "Title must be at most 200 characters.");
+  }
+  if (query.comments !== undefined) {
+    if (query.comments !== "0" && query.comments !== "1") {
+      return errorResponse("invalid_request", "comments must be 0 or 1.");
+    }
+    if (query.comments === "1") {
+      return errorResponse(
+        "invalid_request",
+        "Reader comments are document-only; video artifacts do not support comments.",
+      );
+    }
+  }
+  const maxTtl = parseDuration(env.MAX_VIDEO_TTL)!;
+  const defaultTtl = parseDuration(env.DEFAULT_VIDEO_TTL)!;
+  let ttlSeconds = defaultTtl;
+  if (query.ttl !== undefined) {
+    const parsed = parseDuration(query.ttl);
+    if (parsed === null || parsed < VIDEO_MIN_TTL_SECONDS || parsed > maxTtl) {
+      return errorResponse(
+        "invalid_ttl",
+        `TTL must be a duration between 1h and ${env.MAX_VIDEO_TTL}, e.g. "12h" or "3d".`,
+      );
+    }
+    ttlSeconds = parsed;
+  }
+  return { title, ttlSeconds };
+}
+
+// Validates a raw video/mp4 publish: title/ttl/comments query params plus a
+// required, bounded Content-Length. Never reads the body — request.body
+// streams straight to Store untouched.
+function readVideoPublishInput(
+  request: Request,
+  env: Env,
+  query: { title?: string; ttl?: string; comments?: string; filename?: string },
+): VideoPublishInput | Response {
+  const meta = validateVideoTitleTtl(env, query);
+  if (meta instanceof Response) return meta;
+
+  const maxBytes = Number(env.MAX_VIDEO_BYTES);
+  const contentLengthHeader = request.headers.get("Content-Length");
+  const contentLength = contentLengthHeader !== null ? Number(contentLengthHeader) : NaN;
+  if (!Number.isFinite(contentLength) || !Number.isInteger(contentLength) || contentLength <= 0) {
+    return errorResponse(
+      "invalid_request",
+      "Content-Length is required for video uploads and must be a positive integer.",
+    );
+  }
+  if (contentLength > maxBytes) {
+    return errorResponse("too_large", `Video exceeds the ${maxBytes}-byte size limit.`);
+  }
+
+  const passcode = request.headers.get("X-Snapdoc-Passcode") || undefined;
+  return {
+    title: meta.title,
+    ttlSeconds: meta.ttlSeconds,
+    filename: query.filename ?? "",
+    contentLength,
+    passcode,
+  };
+}
+
 // Validates the shared publish inputs (content type, size, ttl, title) and
 // renders markdown to a self-contained HTML document. A multipart/form-data
 // body (document + image parts) is handled separately. Returns a Response on
@@ -71,7 +199,7 @@ export async function readPublishInput(
   env: Env,
   query: { title?: string; ttl?: string; comments?: string },
 ): Promise<PublishInput | Response> {
-  const rawType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+  const rawType = normalizedContentType(request);
   if (rawType === "multipart/form-data") {
     return readMultipartPublishInput(request, env, query);
   }
@@ -232,6 +360,60 @@ async function enforceRateLimit(store: Store, tokenId: string, env: Env): Promis
   );
 }
 
+// Poster uploads are small (<= MAX_POSTER_BYTES, 5 MiB), so this may buffer
+// the body with arrayBuffer() — unlike the primary video body, which always
+// streams straight to R2. Both the declared Content-Length and the actual
+// buffered size are checked; Store sniffs the bytes and rejects anything
+// that isn't really a JPEG/PNG matching the declared Content-Type.
+async function uploadVideoPoster(
+  c: Context<ApiContext, "/artifacts/:id/versions/:version/poster">,
+): Promise<Response> {
+  const store = c.get("store");
+  const id = c.req.param("id");
+  const version = Number(c.req.param("version"));
+  if (!Number.isInteger(version) || version < 1) {
+    return errorResponse("invalid_request", "version must be a positive integer.");
+  }
+
+  const contentType = normalizedContentType(c.req.raw);
+  if (contentType !== "image/jpeg" && contentType !== "image/png") {
+    return errorResponse("unsupported_content_type", "Poster Content-Type must be image/jpeg or image/png.");
+  }
+
+  const maxBytes = Number(c.env.MAX_POSTER_BYTES);
+  const contentLengthHeader = c.req.raw.headers.get("Content-Length");
+  const declaredLength = contentLengthHeader !== null ? Number(contentLengthHeader) : NaN;
+  if (!Number.isFinite(declaredLength) || !Number.isInteger(declaredLength) || declaredLength <= 0) {
+    return errorResponse(
+      "invalid_request",
+      "Content-Length is required for poster uploads and must be a positive integer.",
+    );
+  }
+  if (declaredLength > maxBytes) {
+    return errorResponse("too_large", `Poster exceeds the ${maxBytes}-byte size limit.`);
+  }
+
+  const bytes = new Uint8Array(await c.req.raw.arrayBuffer());
+  if (bytes.byteLength !== declaredLength) {
+    return errorResponse("invalid_request", "Uploaded poster size does not match the declared Content-Length.");
+  }
+
+  const video = await store.setVideoPoster(id, version, bytes, contentType);
+  const found = await store.getArtifact(id);
+  if (!found) return errorResponse("not_found", "Artifact not found.");
+  const versionEntry = found.versions.find((v) => v.version === version);
+  if (!versionEntry) return errorResponse("not_found", "Video version not found.");
+
+  const json: Record<string, unknown> = versionJson(versionEntry, { id, env: c.env, video });
+  // Only the current version's poster affects the stable (non-versioned) URLs.
+  if (found.artifact.currentVersion === version) {
+    json.url = `https://${c.env.ARTIFACT_HOST}/${id}`;
+    json.file_url = videoFileUrl(id, video.filename, c.env);
+    json.poster_url = videoPosterUrl(id, video, c.env);
+  }
+  return c.json(json);
+}
+
 export function createPublisherApp(): Hono<ApiContext> {
   const app = new Hono<ApiContext>();
 
@@ -273,6 +455,33 @@ export function createPublisherApp(): Hono<ApiContext> {
     const rateLimited = await enforceRateLimit(store, token.id, c.env);
     if (rateLimited) return rateLimited;
 
+    // Video is dispatched on the normalized Content-Type before any document
+    // parsing — request.body streams straight to Store, never buffered.
+    if (normalizedContentType(c.req.raw) === VIDEO_CONTENT_TYPE) {
+      const input = readVideoPublishInput(c.req.raw, c.env, {
+        title: c.req.query("title"),
+        ttl: c.req.query("ttl"),
+        comments: c.req.query("comments"),
+        filename: c.req.query("filename"),
+      });
+      if (input instanceof Response) return input;
+      const body = c.req.raw.body;
+      if (!body) return errorResponse("invalid_request", "A video body is required.");
+
+      const artifact = await store.createVideoArtifact({
+        tokenId: token.id,
+        title: input.title,
+        ttlSeconds: input.ttlSeconds,
+        filename: input.filename,
+        contentLength: input.contentLength,
+        maxDurationMs: Number(c.env.MAX_VIDEO_DURATION_SECONDS) * 1000,
+        body,
+        passcode: input.passcode,
+      });
+      await store.recordPublish(token.id);
+      return c.json(artifactJson(artifact, c.env, { video: artifact.video }), 201);
+    }
+
     const input = await readPublishInput(c.req.raw, c.env, {
       title: c.req.query("title"),
       ttl: c.req.query("ttl"),
@@ -303,6 +512,29 @@ export function createPublisherApp(): Hono<ApiContext> {
     const rateLimited = await enforceRateLimit(store, token.id, c.env);
     if (rateLimited) return rateLimited;
 
+    if (normalizedContentType(c.req.raw) === VIDEO_CONTENT_TYPE) {
+      const input = readVideoPublishInput(c.req.raw, c.env, {
+        title: c.req.query("title"),
+        ttl: c.req.query("ttl"),
+        comments: c.req.query("comments"),
+        filename: c.req.query("filename"),
+      });
+      if (input instanceof Response) return input;
+      const body = c.req.raw.body;
+      if (!body) return errorResponse("invalid_request", "A video body is required.");
+
+      const artifact = await store.addVideoVersion(c.req.param("id"), {
+        title: input.title,
+        ttlSeconds: input.ttlSeconds,
+        filename: input.filename,
+        contentLength: input.contentLength,
+        maxDurationMs: Number(c.env.MAX_VIDEO_DURATION_SECONDS) * 1000,
+        body,
+      });
+      await store.recordPublish(token.id);
+      return c.json(artifactJson(artifact, c.env, { video: artifact.video }), 201);
+    }
+
     const input = await readPublishInput(c.req.raw, c.env, {
       title: c.req.query("title"),
       ttl: c.req.query("ttl"),
@@ -326,14 +558,22 @@ export function createPublisherApp(): Hono<ApiContext> {
     return c.json(json, 201);
   });
 
+  app.put("/artifacts/:id/versions/:version/poster", uploadVideoPoster);
+
   app.get("/artifacts", async (c) => {
     const store = c.get("store");
     const token = c.get("token");
     const params = parseListParams(c.req.query("status"), c.req.query("limit"), c.req.query("cursor"));
     if (params instanceof Response) return params;
     const { artifacts, nextCursor } = await store.listArtifacts({ tokenId: token.id, ...params });
+    const jsons = await Promise.all(
+      artifacts.map(async (a) => {
+        const video = a.kind === "video" ? ((await store.getVideoVersion(a.id, a.currentVersion)) ?? undefined) : undefined;
+        return artifactJson(a, c.env, { video });
+      }),
+    );
     return c.json({
-      artifacts: artifacts.map((a) => artifactJson(a, c.env)),
+      artifacts: jsons,
       next_cursor: nextCursor,
     });
   });
@@ -343,9 +583,24 @@ export function createPublisherApp(): Hono<ApiContext> {
     const found = await store.getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
     const assets = await store.listAssets(found.artifact.id);
+
+    // Video metadata lives per-version, so fetch each version's row to
+    // enrich both the current artifact JSON and its own version entry.
+    let currentVideo: VideoVersionMetadata | undefined;
+    const videoByVersion = new Map<number, VideoVersionMetadata>();
+    if (found.artifact.kind === "video") {
+      for (const v of found.versions) {
+        const meta = await store.getVideoVersion(found.artifact.id, v.version);
+        if (meta) videoByVersion.set(v.version, meta);
+      }
+      currentVideo = videoByVersion.get(found.artifact.currentVersion);
+    }
+
     return c.json({
-      artifact: artifactJson(found.artifact, c.env),
-      versions: found.versions.map(versionJson),
+      artifact: artifactJson(found.artifact, c.env, { video: currentVideo }),
+      versions: found.versions.map((v) =>
+        versionJson(v, { id: found.artifact.id, env: c.env, video: videoByVersion.get(v.version) }),
+      ),
       assets: assets.map((a) => assetJson(found.artifact.id, a, c.env)),
     });
   });
@@ -376,9 +631,18 @@ export function createPublisherApp(): Hono<ApiContext> {
     const version = parseContentVersion(c.req.query("version"));
     if (version instanceof Response) return version;
 
-    const gate = await store.getArtifactGate(id);
-    if (!gate) return errorResponse("not_found", "Artifact not found.");
+    // getArtifact (not the lighter getArtifactGate) so `kind` is available —
+    // this endpoint is document-only and must reject video artifacts below.
+    const found = await store.getArtifact(id);
+    if (!found) return errorResponse("not_found", "Artifact not found.");
+    const gate = found.artifact;
     if (gate.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
+    if (gate.kind === "video") {
+      return errorResponse(
+        "invalid_request",
+        "Video artifacts have no text content; use the watch page or file URL from the artifact metadata instead.",
+      );
+    }
 
     if (gate.hasPasscode) {
       const passcode = c.req.header("X-Snapdoc-Passcode");
