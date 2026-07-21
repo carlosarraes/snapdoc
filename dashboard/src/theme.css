@@ -201,6 +201,20 @@ td .id { color: var(--dim); font-size: 12px; }
 .badge.deleted { color: var(--red); border-color: rgba(248, 81, 73, 0.4); background: rgba(248, 81, 73, 0.08); }
 .lock { color: var(--amber); margin-left: 6px; }
 
+/* Artifact kind (document/video), shown next to title/status everywhere an artifact appears. */
+.kind-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  text-transform: lowercase;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.kind-badge.video { color: var(--accent); border-color: rgba(63, 185, 80, 0.4); background: var(--accent-glow); }
+
 /* ---- detail / meta ---- */
 .meta-grid {
   display: grid;
@@ -266,6 +280,22 @@ td .id { color: var(--dim); font-size: 12px; }
 }
 .chip:hover { border-color: var(--border-bright); color: var(--text); }
 .chip.active { color: var(--accent); border-color: rgba(63, 185, 80, 0.4); background: var(--accent-glow); }
+
+/* ---- video ---- */
+/* Fluid width, intrinsic height (no fixed aspect/height so it fits any source). */
+.video-player {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+/* Videos expire much sooner than documents (<=7d); call that out where shown. */
+.expires-soon {
+  color: var(--amber);
+  font-weight: 600;
+}
 
 /* ---- token secret ---- */
 .secret {

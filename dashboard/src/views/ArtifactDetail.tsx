@@ -5,6 +5,17 @@ import { Banner, CopyButton, RelativeTime, useAsync } from "../components";
 
 type StatusFilter = "all" | "open" | "resolved";
 
+// mm:ss (h:mm:ss past an hour); durationMs is always non-negative for videos.
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.round(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const mm = hours > 0 ? String(minutes).padStart(2, "0") : String(minutes);
+  const ss = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 export function ArtifactDetail() {
   const { id = "" } = useParams();
   const meta = useAsync(() => api.getArtifact(id), [id]);
@@ -133,6 +144,7 @@ export function ArtifactDetail() {
       <h2>
         <span className="prompt">$</span>
         {a?.title || id}
+        {a && <span className={`kind-badge ${a.kind}`}>{a.kind}</span>}
       </h2>
       <p className="subtitle">{id}</p>
 
@@ -151,7 +163,7 @@ export function ArtifactDetail() {
                 expire
               </button>
             )}
-            {a.status === "active" && !a.has_passcode && (
+            {a.kind !== "video" && a.status === "active" && !a.has_passcode && (
               <button className="btn" onClick={() => toggleComments(!a.comments_enabled)}>
                 {a.comments_enabled ? "disable comments" : "enable comments"}
               </button>
@@ -178,25 +190,69 @@ export function ArtifactDetail() {
               <dd>{formatBytes(a.size_bytes)}</dd>
               <dt>token</dt>
               <dd>{a.token_name ?? "—"}</dd>
-              <dt>comments</dt>
-              <dd>
-                {a.comments_enabled ? (
-                  <>
-                    <span className="badge active">on</span>{" "}
-                    <a href={reviewUrl} target="_blank" rel="noreferrer">
-                      review ↗
-                    </a>
-                  </>
-                ) : (
-                  <span className="muted">off</span>
-                )}
-              </dd>
+              {a.kind === "video" && a.duration_ms != null && (
+                <>
+                  <dt>duration</dt>
+                  <dd>{formatDuration(a.duration_ms)}</dd>
+                </>
+              )}
+              {a.kind === "video" && a.width != null && a.height != null && (
+                <>
+                  <dt>dimensions</dt>
+                  <dd>
+                    {a.width}×{a.height}
+                  </dd>
+                </>
+              )}
+              {a.kind === "video" && a.video_codec && (
+                <>
+                  <dt>codecs</dt>
+                  <dd>
+                    video: {a.video_codec}, audio: {a.audio_codec ?? "none"}
+                  </dd>
+                </>
+              )}
+              {a.kind !== "video" && (
+                <>
+                  <dt>comments</dt>
+                  <dd>
+                    {a.comments_enabled ? (
+                      <>
+                        <span className="badge active">on</span>{" "}
+                        <a href={reviewUrl} target="_blank" rel="noreferrer">
+                          review ↗
+                        </a>
+                      </>
+                    ) : (
+                      <span className="muted">off</span>
+                    )}
+                  </dd>
+                </>
+              )}
               <dt>created</dt>
               <dd>{formatDate(a.created_at)}</dd>
               <dt>expires</dt>
-              <dd>{formatDate(a.expires_at)}</dd>
+              <dd className={a.kind === "video" ? "expires-soon" : undefined}>{formatDate(a.expires_at)}</dd>
             </dl>
           </div>
+
+          {a.kind === "video" && (
+            <>
+              <div className="section-label">video</div>
+              <div className="card" style={{ padding: 16 }}>
+                <video
+                  className="video-player"
+                  controls
+                  preload="metadata"
+                  src={a.file_url}
+                  poster={a.poster_url ?? undefined}
+                />
+                <div className="row" style={{ marginTop: 12 }}>
+                  {a.file_url && <CopyButton text={a.file_url} label="copy file url" />}
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="section-label">versions</div>
           <div className="card">
@@ -218,9 +274,29 @@ export function ArtifactDetail() {
                     <td className="muted">{v.content_type}</td>
                     <td className="muted">{formatDate(v.created_at)}</td>
                     <td>
-                      <a href={`${a.url}/v/${v.version}`} target="_blank" rel="noreferrer">
-                        view ↗
-                      </a>
+                      {v.kind === "video" ? (
+                        <div className="actions">
+                          {v.version_url && (
+                            <a href={v.version_url} target="_blank" rel="noreferrer">
+                              watch ↗
+                            </a>
+                          )}
+                          {v.version_file_url && (
+                            <a href={v.version_file_url} target="_blank" rel="noreferrer">
+                              file ↗
+                            </a>
+                          )}
+                          {v.version_poster_url && (
+                            <a href={v.version_poster_url} target="_blank" rel="noreferrer">
+                              poster ↗
+                            </a>
+                          )}
+                        </div>
+                      ) : (
+                        <a href={`${a.url}/v/${v.version}`} target="_blank" rel="noreferrer">
+                          view ↗
+                        </a>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -228,7 +304,7 @@ export function ArtifactDetail() {
             </table>
           </div>
 
-          {meta.data?.assets && meta.data.assets.length > 0 && (
+          {a.kind !== "video" && meta.data?.assets && meta.data.assets.length > 0 && (
             <>
               <div className="section-label">images ({meta.data.assets.length})</div>
               <div className="card">

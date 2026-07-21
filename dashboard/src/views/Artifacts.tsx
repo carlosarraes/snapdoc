@@ -117,6 +117,7 @@ export function Artifacts() {
                 </td>
                 <td>
                   <span className={`badge ${a.status}`}>{a.status}</span>
+                  <span className={`kind-badge ${a.kind}`}>{a.kind}</span>
                   {a.has_passcode && <span className="lock" title="passcode-protected">🔒</span>}
                 </td>
                 <td className="num">{a.current_version}</td>

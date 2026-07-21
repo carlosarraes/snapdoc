@@ -1,6 +1,8 @@
 // Thin client for the /v1/admin API. Same-origin fetch rides the Cloudflare
 // Access session; the SPA does no auth itself. All business rules are server-side.
 
+export type ArtifactKind = "document" | "video";
+
 export interface Artifact {
   id: string;
   url: string;
@@ -14,6 +16,17 @@ export interface Artifact {
   has_passcode: boolean;
   comments_enabled: boolean;
   token_name?: string | null;
+  kind: ArtifactKind;
+  file_url?: string;
+  version_url?: string;
+  version_file_url?: string;
+  poster_url?: string | null;
+  version_poster_url?: string | null;
+  duration_ms?: number;
+  width?: number;
+  height?: number;
+  video_codec?: string;
+  audio_codec?: string | null;
 }
 
 export interface Version {
@@ -21,6 +34,15 @@ export interface Version {
   size_bytes: number;
   content_type: string;
   created_at: string;
+  kind: ArtifactKind;
+  version_url?: string;
+  version_file_url?: string;
+  version_poster_url?: string | null;
+  duration_ms?: number;
+  width?: number;
+  height?: number;
+  video_codec?: string;
+  audio_codec?: string | null;
 }
 
 export interface Asset {
