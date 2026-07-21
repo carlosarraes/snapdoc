@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { API_BASE, ARTIFACT_BASE, mintToken } from "./helpers";
+import { API_BASE, ARTIFACT_BASE, mintToken, publishVideo } from "./helpers";
 
 async function publishProtected(token: string, passcode: string, body = "<h1>secret</h1>") {
   const res = await SELF.fetch(`${API_BASE}/v1/artifacts`, {
@@ -100,5 +100,48 @@ describe("passcode-protected artifacts", () => {
     });
     expect(view.status).toBe(200);
     expect(await view.text()).toContain(`action="/${art.id}/unlock"`);
+  });
+});
+
+describe("passcode-protected video artifacts", () => {
+  // Video routes reuse the exact same status/passcode gate as documents
+  // (see gateArtifact in serve.ts) rather than a separate implementation, so
+  // the same unlock flow — including cookie verification — must apply.
+  it("unlocks a video's watch page and media with the same cookie flow as documents", async () => {
+    const tok = await mintToken();
+    const created = (await (
+      await publishVideo({ token: tok.token, passcode: "letmein", title: "secret clip" })
+    ).json()) as { id: string; file_url: string };
+
+    const locked = await SELF.fetch(`${ARTIFACT_BASE}/${created.id}`);
+    expect(locked.status).toBe(200);
+    expect(await locked.text()).not.toContain("secret clip");
+
+    const unlock = await SELF.fetch(`${ARTIFACT_BASE}/${created.id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: "letmein" }),
+      redirect: "manual",
+    });
+    expect(unlock.status).toBe(303);
+    const cookie = cookieFor(unlock.headers.get("Set-Cookie"), created.id);
+
+    const watch = await SELF.fetch(`${ARTIFACT_BASE}/${created.id}`, { headers: { Cookie: cookie } });
+    expect(await watch.text()).toContain("secret clip");
+
+    const media = await SELF.fetch(new URL(created.file_url).toString(), { headers: { Cookie: cookie } });
+    expect(media.status).toBe(200);
+    expect(media.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("rejects video media with a tampered cookie", async () => {
+    const tok = await mintToken();
+    const created = (await (
+      await publishVideo({ token: tok.token, passcode: "pw" })
+    ).json()) as { id: string; file_url: string };
+    const media = await SELF.fetch(new URL(created.file_url).toString(), {
+      headers: { Cookie: `sd_unlock_${created.id}=deadbeef` },
+    });
+    expect(media.status).toBe(401);
   });
 });

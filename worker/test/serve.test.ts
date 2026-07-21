@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ARTIFACT_BASE, HTML_BODY, mintToken, publish, store } from "./helpers";
+import { ARTIFACT_BASE, HTML_BODY, mintToken, publish, publishVideo, store } from "./helpers";
 
 async function publishedId(opts: { body?: string; title?: string } = {}): Promise<string> {
   const tok = await mintToken();
@@ -147,5 +147,41 @@ describe("admin paths are not served on the artifact host", () => {
       const res = await SELF.fetch(`${ARTIFACT_BASE}${path}`);
       expect(res.status).toBe(404);
     }
+  });
+});
+
+// Task 5 adds kind-aware routing to the same handler documents already use;
+// these confirm the document path is unaffected by that change and that the
+// new video-only routes never leak document content.
+describe("document/video route separation stays backward compatible", () => {
+  it("keeps serving a document artifact's HTML unchanged at /:id", async () => {
+    const id = await publishedId();
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(HTML_BODY);
+    expect(res.headers.get("Content-Type")).toContain("text/html");
+  });
+
+  it("404s a /:id/media/... request against a document artifact", async () => {
+    const id = await publishedId();
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}/media/whatever.mp4`);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s a /:id/poster.jpg request against a document artifact", async () => {
+    const id = await publishedId();
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}/poster.jpg`);
+    expect(res.status).toBe(404);
+  });
+
+  it("renders the video watch page (not raw MP4 bytes) at the bare /:id for a video artifact", async () => {
+    const tok = await mintToken();
+    const res = await publishVideo({ token: tok.token, title: "clip" });
+    const { id } = (await res.json()) as { id: string };
+    const watch = await SELF.fetch(`${ARTIFACT_BASE}/${id}`);
+    expect(watch.status).toBe(200);
+    expect(watch.headers.get("Content-Type")).toContain("text/html");
+    const html = await watch.text();
+    expect(html).toContain("<video");
   });
 });

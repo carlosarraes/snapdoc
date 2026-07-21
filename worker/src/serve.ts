@@ -1,7 +1,12 @@
-// Artifact serving host: GET /:id and /:id/v/:n; POST /:id/unlock for passcode
-// entry; everything else falls through to static assets (landing page).
+// Artifact serving host: GET /:id and /:id/v/:n (document or video watch
+// page); GET /:id/media/... and /:id/poster.... (video byte/poster streaming);
+// POST /:id/unlock for passcode entry; everything else falls through to
+// static assets (landing page).
+import { buildMediaResponse, parseSingleRange, videoCacheControl } from "./media-range";
 import { escapeHtml } from "./markdown";
-import { Store } from "./store";
+import { Store, type Artifact, type ArtifactVersion } from "./store";
+import { videoFileUrl, videoPosterUrl, videoVersionFileUrl, videoVersionPosterUrl } from "./http";
+import { renderVideoPage, VIDEO_PAGE_CSP } from "./video-page";
 import type { Env } from "./types";
 
 const ID_PATTERN = /^\/([A-Za-z0-9_-]{14})(?:\/v\/(\d+))?$/;
@@ -9,6 +14,13 @@ const UNLOCK_PATTERN = /^\/([A-Za-z0-9_-]{14})\/unlock$/;
 // Hosted asset: /{id}/a/{sha256} (the optional /v/{n} segment is accepted but
 // cosmetic — assets are looked up by (id, hash), which is immutable).
 const ASSET_PATTERN = /^\/([A-Za-z0-9_-]{14})(?:\/v\/\d+)?\/a\/([0-9a-f]{64})$/;
+// Video byte-range media and poster routes. The filename/extension segment is
+// presentation-only — it must match the stored version metadata exactly or
+// the route 404s; it never selects the underlying R2 key.
+const MEDIA_PATTERN = /^\/([A-Za-z0-9_-]{14})\/media\/([^/]+)$/;
+const MEDIA_VERSION_PATTERN = /^\/([A-Za-z0-9_-]{14})\/v\/(\d+)\/media\/([^/]+)$/;
+const POSTER_PATTERN = /^\/([A-Za-z0-9_-]{14})\/poster\.(jpg|png)$/;
+const POSTER_VERSION_PATTERN = /^\/([A-Za-z0-9_-]{14})\/v\/(\d+)\/poster\.(jpg|png)$/;
 
 // Self-contained inline CSS/JS may run, but the page gets no privileged
 // reach: no external network targets beyond https/data images & fonts, no
@@ -237,6 +249,232 @@ async function serveAsset(id: string, hash: string, request: Request, store: Sto
   return new Response(request.method === "HEAD" ? null : asset.body, { status: 200, headers });
 }
 
+// ---- shared status/passcode gate ----
+// Single source of truth for "does this id resolve to a servable artifact"
+// (existence, expiry/deletion, passcode-unlock), used by the watch page and
+// by every video byte/poster route so none of them re-implements the rules.
+// `mode: "page"` answers rejections with the full trusted HTML pages the
+// watch route already used; `mode: "plain"` answers with the same bare
+// status responses `serveAsset` uses for binary resources.
+type ArtifactGateResult =
+  | { ok: true; artifact: Artifact; versions: ArtifactVersion[] }
+  | { ok: false; response: Response };
+
+async function gateArtifact(
+  id: string,
+  request: Request,
+  store: Store,
+  mode: "page" | "plain",
+): Promise<ArtifactGateResult> {
+  const record = await store.getArtifact(id);
+  if (!record) {
+    return {
+      ok: false,
+      response:
+        mode === "page"
+          ? statusPage({
+              status: 404,
+              heading: "Artifact not found",
+              message: "This snapdoc link does not exist. Check the URL for typos.",
+            })
+          : new Response("Not found", { status: 404, headers: ASSET_HEADERS }),
+    };
+  }
+  const { artifact } = record;
+  if (artifact.status === "expired") {
+    return {
+      ok: false,
+      response:
+        mode === "page"
+          ? statusPage({
+              status: 410,
+              heading: "Artifact expired",
+              message: "This snapdoc artifact reached its retention period and is no longer available.",
+            })
+          : new Response("Gone", { status: 410, headers: ASSET_HEADERS }),
+    };
+  }
+  if (artifact.status === "deleted") {
+    return {
+      ok: false,
+      response:
+        mode === "page"
+          ? statusPage({
+              status: 410,
+              heading: "Artifact removed",
+              message: "This snapdoc artifact was deleted by its owner and is no longer available.",
+            })
+          : new Response("Gone", { status: 410, headers: ASSET_HEADERS }),
+    };
+  }
+  if (artifact.hasPasscode) {
+    const cookie = readCookie(request, `sd_unlock_${id}`);
+    const unlocked = cookie ? await store.checkViewerToken(id, cookie) : false;
+    if (!unlocked) {
+      return {
+        ok: false,
+        response:
+          mode === "page"
+            ? unlockPage(id, { status: 200, error: false })
+            : new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS }),
+      };
+    }
+  }
+  return { ok: true, artifact, versions: record.versions };
+}
+
+// Renders the video watch page. Reuses the same gate as the document path —
+// callers only reach here once status/passcode have already cleared.
+async function serveVideoWatchPage(
+  request: Request,
+  env: Env,
+  store: Store,
+  id: string,
+  version: number | undefined,
+  artifact: Artifact,
+  versions: ArtifactVersion[],
+): Promise<Response> {
+  const resolvedVersion = version ?? artifact.currentVersion;
+  const versionEntry = versions.find((v) => v.version === resolvedVersion);
+  const video = versionEntry ? await store.getVideoVersion(id, resolvedVersion) : null;
+  if (!versionEntry || !video) {
+    return statusPage({
+      status: 404,
+      heading: "Artifact not found",
+      message: "This snapdoc link does not exist. Check the URL for typos.",
+    });
+  }
+
+  const mediaUrl =
+    version !== undefined
+      ? videoVersionFileUrl(id, resolvedVersion, video.filename, env)
+      : videoFileUrl(id, video.filename, env);
+  const posterUrl =
+    version !== undefined
+      ? videoVersionPosterUrl(id, resolvedVersion, video, env)
+      : videoPosterUrl(id, video, env);
+
+  const html = renderVideoPage({
+    title: artifact.title,
+    filename: video.filename,
+    mediaUrl,
+    posterUrl,
+    durationMs: video.durationMs,
+    sizeBytes: versionEntry.sizeBytes,
+    expiresAt: artifact.expiresAt,
+  });
+
+  return new Response(request.method === "HEAD" ? null : html, {
+    status: 200,
+    headers: {
+      "X-Robots-Tag": "noindex, nofollow",
+      "Content-Security-Policy": VIDEO_PAGE_CSP,
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": artifact.hasPasscode ? "private, no-store" : videoCacheControl(artifact.expiresAt),
+    },
+  });
+}
+
+// Streams a video's primary MP4 bytes, honoring a single `Range:` header.
+// Never reads env.BLOBS directly — all bytes come through the Store seam
+// (headVideoObject for size/etag, getVideoObject for the body).
+async function serveVideoMedia(
+  request: Request,
+  store: Store,
+  id: string,
+  version: number | undefined,
+  filename: string,
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+  }
+  const gated = await gateArtifact(id, request, store, "plain");
+  if (!gated.ok) return gated.response;
+  const { artifact, versions } = gated;
+
+  const resolvedVersion = version ?? artifact.currentVersion;
+  const versionEntry = versions.find((v) => v.version === resolvedVersion);
+  if (!versionEntry) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+  const video = await store.getVideoVersion(id, resolvedVersion);
+  // The URL's filename is presentation-only: it must match the stored
+  // version metadata exactly, never used to pick the R2 key.
+  if (!video || video.filename !== filename) {
+    return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+  }
+
+  const head = await store.headVideoObject(id, resolvedVersion);
+  if (!head) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+
+  const range = parseSingleRange(request.headers.get("Range"), head.size);
+  const spec = buildMediaResponse({
+    range,
+    size: head.size,
+    contentType: "video/mp4",
+    etag: head.httpEtag,
+    cors: !artifact.hasPasscode,
+    cacheControl: artifact.hasPasscode ? "private, no-store" : videoCacheControl(artifact.expiresAt),
+  });
+
+  // HEAD (and an unsatisfiable range) never need the body — GET and HEAD
+  // otherwise get identical headers from the same buildMediaResponse call.
+  if (request.method === "HEAD" || range.kind === "invalid") {
+    return new Response(null, { status: spec.status, headers: spec.headers });
+  }
+
+  const object =
+    range.kind === "partial"
+      ? await store.getVideoObject(id, resolvedVersion, { offset: range.offset, length: range.length })
+      : await store.getVideoObject(id, resolvedVersion);
+  if (!object) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+
+  return new Response(object.body, { status: spec.status, headers: spec.headers });
+}
+
+// Serves a video's poster image. Posters never support byte ranges (Store
+// exposes no ranged read for them), so this always answers with the full
+// image or a 404 — no 206/416 path here.
+async function serveVideoPoster(
+  request: Request,
+  store: Store,
+  id: string,
+  version: number | undefined,
+  ext: "jpg" | "png",
+): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+  }
+  const gated = await gateArtifact(id, request, store, "plain");
+  if (!gated.ok) return gated.response;
+  const { artifact, versions } = gated;
+
+  const resolvedVersion = version ?? artifact.currentVersion;
+  const versionEntry = versions.find((v) => v.version === resolvedVersion);
+  if (!versionEntry) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+  const video = await store.getVideoVersion(id, resolvedVersion);
+  const expectedExt = video?.posterContentType === "image/jpeg" ? "jpg" : video?.posterContentType === "image/png" ? "png" : null;
+  if (!video || !expectedExt || expectedExt !== ext) {
+    return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+  }
+
+  const poster = await store.getPosterObject(id, resolvedVersion);
+  if (!poster) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
+
+  const headers: Record<string, string> = {
+    "Content-Type": video.posterContentType!,
+    "Content-Disposition": "inline",
+    ETag: poster.httpEtag,
+    "X-Robots-Tag": "noindex, nofollow",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": artifact.hasPasscode ? "private, no-store" : videoCacheControl(artifact.expiresAt),
+    "Content-Length": String(poster.size),
+  };
+  if (!artifact.hasPasscode) headers["Access-Control-Allow-Origin"] = "*";
+
+  return new Response(request.method === "HEAD" ? null : poster.body, { status: 200, headers });
+}
+
 export async function serveArtifactHost(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
@@ -281,6 +519,31 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
     return serveAsset(assetMatch[1], assetMatch[2], request, store);
   }
 
+  // Video media/poster patterns are more specific than the generic /:id
+  // pattern below (which has no trailing segments), so they must be checked
+  // first — a document artifact hitting one of these simply 404s (no
+  // video_versions row to match against).
+  const mediaVersionMatch = MEDIA_VERSION_PATTERN.exec(url.pathname);
+  if (mediaVersionMatch) {
+    const [, id, versionStr, filename] = mediaVersionMatch;
+    return serveVideoMedia(request, store, id, Number(versionStr), filename);
+  }
+  const mediaMatch = MEDIA_PATTERN.exec(url.pathname);
+  if (mediaMatch) {
+    const [, id, filename] = mediaMatch;
+    return serveVideoMedia(request, store, id, undefined, filename);
+  }
+  const posterVersionMatch = POSTER_VERSION_PATTERN.exec(url.pathname);
+  if (posterVersionMatch) {
+    const [, id, versionStr, ext] = posterVersionMatch;
+    return serveVideoPoster(request, store, id, Number(versionStr), ext as "jpg" | "png");
+  }
+  const posterMatch = POSTER_PATTERN.exec(url.pathname);
+  if (posterMatch) {
+    const [, id, ext] = posterMatch;
+    return serveVideoPoster(request, store, id, undefined, ext as "jpg" | "png");
+  }
+
   const match = ID_PATTERN.exec(url.pathname);
   if (!match) return env.ASSETS.fetch(request);
 
@@ -291,33 +554,12 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
   const [, id, versionStr] = match;
   const version = versionStr !== undefined ? Number(versionStr) : undefined;
 
-  const gate = await store.getArtifactGate(id);
-  if (!gate) {
-    return statusPage({
-      status: 404,
-      heading: "Artifact not found",
-      message: "This snapdoc link does not exist. Check the URL for typos.",
-    });
-  }
-  if (gate.status === "expired") {
-    return statusPage({
-      status: 410,
-      heading: "Artifact expired",
-      message: "This snapdoc artifact reached its retention period and is no longer available.",
-    });
-  }
-  if (gate.status === "deleted") {
-    return statusPage({
-      status: 410,
-      heading: "Artifact removed",
-      message: "This snapdoc artifact was deleted by its owner and is no longer available.",
-    });
-  }
+  const gated = await gateArtifact(id, request, store, "page");
+  if (!gated.ok) return gated.response;
+  const { artifact: gate, versions: gatedVersions } = gated;
 
-  if (gate.hasPasscode) {
-    const cookie = readCookie(request, `sd_unlock_${id}`);
-    const unlocked = cookie ? await store.checkViewerToken(id, cookie) : false;
-    if (!unlocked) return unlockPage(id, { status: 200, error: false });
+  if (gate.kind === "video") {
+    return serveVideoWatchPage(request, env, store, id, version, gate, gatedVersions);
   }
 
   const content = await store.getServableContent(id, version);
