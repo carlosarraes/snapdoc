@@ -22,6 +22,8 @@ PUBLISH
   cat report.md | snapdoc publish - --markdown
   snapdoc publish report.html --quiet                  # print only the URL
   Add --json to any command for machine-readable output.
+  Fenced Mermaid blocks in Markdown render natively with a readable source
+  fallback; add accTitle and accDescr directives for accessible diagrams.
 
 PUBLISH WITH IMAGES
   Reference images with normal relative paths:

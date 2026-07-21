@@ -84,6 +84,15 @@ URLs — remote `https://` and `data:` refs are left untouched. Use `--assets-ba
 ≤5 MB/image, ≤20 images, ≤25 MB total; png/jpeg/gif/webp/avif (SVG unsupported).
 Run `snapdoc llm` for a compact, copy-pasteable guide aimed at agents.
 
+**Mermaid diagrams:** fenced `mermaid` blocks in Markdown render natively in
+shared documents and review mode. Snapdoc pins and self-hosts Mermaid 11.15.0,
+runs it with strict security settings, and keeps the escaped diagram source as a
+readable fallback when rendering is unavailable or fails. Add Mermaid
+`accTitle` and `accDescr` directives when a diagram needs a richer accessible
+description. The Markdown source remains available through `snapdoc read`, so
+Git can stay the permanent source of truth while Snapdoc hosts each review
+version and its comments.
+
 **Videos:** an `.mp4` file argument is auto-detected — `snapdoc publish
 recording.mp4` streams it with an exact `Content-Length` (never from stdin) and
 prints a watch page URL alongside the raw file URL. Limits: MP4 container,

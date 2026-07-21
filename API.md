@@ -188,6 +188,16 @@ a table of contents). Heading anchors are always added. Title precedence:
 explicit `?title=` > frontmatter `title` > default. The frontmatter title becomes
 the stored artifact title when no `?title=` is given.
 
+**Mermaid diagrams.** A fenced code block whose info string is `mermaid`
+(case-insensitive) renders as a native diagram in the served document. Snapdoc
+uses a pinned, same-origin Mermaid 11.15.0 runtime with strict security settings;
+it does not load Mermaid from a CDN or relax the artifact's network policy. The
+escaped source remains available as fallback text and is shown automatically if
+the runtime is unavailable or a diagram fails. Authors should use Mermaid's
+`accTitle` and `accDescr` directives for diagram-specific accessible names and
+descriptions. Other fenced code blocks and raw HTML retain their existing
+behavior.
+
 **Publishing with images (`multipart/form-data`).** To host images referenced by
 the document, send `Content-Type: multipart/form-data` instead of a raw body:
 
@@ -392,8 +402,10 @@ images).
 - `format` echoes what was actually produced: if `md` conversion degenerates the
   server falls back to the raw HTML and reports `format: "html"`, so the downgrade
   is visible. Reconstructed Markdown is best-effort and not guaranteed identical to
-  the author's original (only rendered HTML is stored). 404 `not_found` (unknown
-  artifact/version); 410 `gone` (expired/deleted).
+  the author's original (only rendered HTML is stored). Generated Mermaid figures
+  are converted back to fenced `mermaid` source without their rendering or fallback
+  chrome. 404 `not_found` (unknown artifact/version); 410 `gone`
+  (expired/deleted).
 - **Video artifacts have no text content** — this endpoint is document-only.
   Calling it on a video artifact is `invalid_request`, pointing at the watch
   page or file URL from the artifact metadata instead.
@@ -477,10 +489,12 @@ and per-artifact.
   (`author_kind: "anon"`), thread-ordered, `author_email` omitted. Same shape as
   the token read otherwise, including `anchor`.
 - `POST /v1/reader/artifacts/{id}/comments` — post a reader comment. Body:
-  `{ "author_name", "author_email"?, "body", "anchor"?, "parent_id"? }`.
+  `{ "author_name", "author_email"?, "body", "anchor"?, "parent_id"?, "version"? }`.
   A **root** requires `anchor` (`{ "exact", "prefix", "suffix", "start", "end" }`,
   `exact` ≤1000, context ≤64); a **reply** sets `parent_id` (an existing anon root
-  on this artifact) and omits `anchor`. `author_name` 1–80, `body` ≤8 KB.
+  on this artifact) and omits `anchor`. A root's optional `version` is a positive
+  existing artifact version; omitted roots default to the latest version. Replies
+  always inherit their root's version. `author_name` 1–80, `body` ≤8 KB.
   201 → the reader comment (no `author_email`), setting an `sd_reviewer` cookie
   (HttpOnly, Secure, SameSite=Lax) — the self-delete capability. Errors:
   `comments_disabled` (403) when not opted in, `rate_limited` (429) with
@@ -507,6 +521,13 @@ and per-artifact.
 Headers on artifact responses: `X-Robots-Tag: noindex, nofollow`,
 `Content-Security-Policy` allowing self-contained inline CSS/JS but no privileged reach,
 `Cache-Control: public, max-age=60` for active artifacts only.
+
+Markdown documents containing generated Mermaid figures add only the exact
+versioned, same-origin runtime URL to `script-src`; the runtime tag also carries
+Subresource Integrity metadata. Ordinary HTML and Markdown documents keep the
+existing CSP byte-for-byte. Mermaid rendering settles before annotation mode
+measures text anchors, and generated diagram/fallback chrome is excluded from
+the selectable annotation text.
 
 **Passcode gate.** When an artifact is passcode-protected, `GET /{id}` returns a
 200 unlock page (its own CSP relaxes `form-action` to `'self'`) unless the request
