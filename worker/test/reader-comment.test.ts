@@ -36,6 +36,7 @@ type ReaderPayload = {
   body?: string;
   anchor?: unknown;
   parent_id?: string;
+  version?: number;
 };
 
 async function postReader(id: string, payload: ReaderPayload, opts: { cookie?: string; ip?: string } = {}) {
@@ -216,6 +217,46 @@ describe("reader comments — rate limiting", () => {
     // A different IP is unaffected by the first IP's window.
     const other = await postReader(id, { author_name: "B", body: "fresh", anchor: ANCHOR }, { ip: "198.51.100.9" });
     expect(other.status).toBe(201);
+  });
+});
+
+describe("reader comments — reviewed version attribution", () => {
+  it("records a root against the explicitly reviewed historical version", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    await publish({ token: tok.token, id, body: "<p>version two</p>" });
+
+    const created = (await (await root(id, "v1 feedback", { version: 1 })).json()) as ReaderComment;
+    expect(created.version).toBe(1);
+  });
+
+  it("defaults omitted versions to latest for backward-compatible clients", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    await publish({ token: tok.token, id, body: "<p>version two</p>" });
+
+    const created = (await (await root(id, "latest feedback")).json()) as ReaderComment;
+    expect(created.version).toBe(2);
+  });
+
+  it("rejects invalid and nonexistent reviewed versions", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+
+    await expectError(await root(id, "bad", { version: 0 }), 400, "invalid_request");
+    await expectError(await root(id, "missing", { version: 99 }), 400, "invalid_request");
+  });
+
+  it("keeps replies attached to their root thread's version", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    await publish({ token: tok.token, id, body: "<p>version two</p>" });
+    const rootComment = (await (await root(id, "v1 root", { version: 1 })).json()) as ReaderComment;
+
+    const reply = (await (
+      await postReader(id, { author_name: "Bo", body: "reply", parent_id: rootComment.id, version: 2 })
+    ).json()) as ReaderComment;
+    expect(reply.version).toBe(1);
   });
 });
 

@@ -986,6 +986,7 @@ export class Store {
       authorEmail?: string | null;
       body: string;
       parentId?: string | null;
+      version?: number;
       anchor?: Anchor | null;
       viewerId?: string | null;
     },
@@ -998,11 +999,12 @@ export class Store {
     const anchor = input.anchor ?? null;
     const viewerId = input.viewerId ?? null;
     let parentId: string | null = null;
+    let version = input.version ?? current.currentVersion;
     if (input.parentId) {
       const parent = await this.db
-        .prepare("SELECT id, artifact_id, parent_id, author_kind FROM comments WHERE id = ?1 AND deleted_at IS NULL")
+        .prepare("SELECT id, artifact_id, parent_id, author_kind, version FROM comments WHERE id = ?1 AND deleted_at IS NULL")
         .bind(input.parentId)
-        .first<{ id: string; artifact_id: string; parent_id: string | null; author_kind: string }>();
+        .first<{ id: string; artifact_id: string; parent_id: string | null; author_kind: string; version: number }>();
       // Same message for a missing parent and a cross-kind one, so a reader
       // client can neither reach nor probe for team threads.
       if (!parent || parent.artifact_id !== artifactId || parent.author_kind !== authorKind) {
@@ -1010,10 +1012,18 @@ export class Store {
       }
       // Re-root: a reply always hangs off the thread root, never another reply.
       parentId = parent.parent_id ?? parent.id;
+      // Reader replies remain part of the reviewed-version thread. Team
+      // replies preserve the existing version-at-reply-time behavior.
+      if (authorKind === "anon") version = parent.version;
+    } else if (input.version !== undefined) {
+      const exists = await this.db
+        .prepare("SELECT 1 FROM versions WHERE artifact_id = ?1 AND version = ?2")
+        .bind(artifactId, input.version)
+        .first();
+      if (!exists) throw new StoreError("invalid_request", "Reviewed version not found on this artifact.");
     }
     const id = `cmt_${randomId(16)}`;
     const createdAt = isoNow();
-    const version = current.currentVersion;
     await this.db
       .prepare(
         `INSERT INTO comments

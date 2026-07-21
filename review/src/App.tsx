@@ -100,6 +100,14 @@ export default function App() {
     });
   }, []);
 
+  const selectVersion = useCallback((nextVersion: number) => {
+    setVersion(nextVersion);
+    setPending(null);
+    setFocusId(null);
+    setOrphans(new Set());
+    setReplyTo(null);
+  }, []);
+
   useEffect(() => {
     let live = true;
     (async () => {
@@ -145,18 +153,19 @@ export default function App() {
 
   const submitRoot = useCallback(
     async (body: string) => {
-      if (!pending || !identity.name) return;
+      if (!pending || !identity.name || version === null) return;
       const created = await api.post(ARTIFACT_ID, {
         author_name: identity.name,
         author_email: identity.email || undefined,
         body,
         anchor: pending,
+        version,
       });
       setComments((cs) => [...cs, created]);
       setMine((s) => new Set(s).add(created.id));
       setPending(null);
     },
-    [pending, identity],
+    [pending, identity, version],
   );
 
   const submitReply = useCallback(
@@ -241,7 +250,7 @@ export default function App() {
             versions={meta.versions.map((v) => v.version)}
             current={meta.current_version}
             shown={version}
-            onPick={setVersion}
+            onPick={selectVersion}
           />
         </header>
 

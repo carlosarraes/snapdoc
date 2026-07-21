@@ -69,6 +69,7 @@ export interface PostCommentInput {
   body: string;
   anchor?: Anchor;
   parent_id?: string;
+  version?: number;
 }
 
 export const api = {

@@ -163,6 +163,11 @@ export function createReaderApp(): Hono<ReaderCtx> {
       return errorResponse("invalid_request", "parent_id must be a string.");
     }
 
+    const version = payload.version;
+    if (version !== undefined && (!Number.isInteger(version) || (version as number) < 1)) {
+      return errorResponse("invalid_request", "version must be a positive integer.");
+    }
+
     // A root comment must anchor to selected text; a reply hangs off its thread.
     let anchor: Anchor | null = null;
     if (parentId === undefined || parentId === null) {
@@ -184,6 +189,7 @@ export function createReaderApp(): Hono<ReaderCtx> {
       authorEmail,
       body,
       parentId: typeof parentId === "string" ? parentId : null,
+      version: typeof version === "number" ? version : undefined,
       anchor,
       viewerId,
     });
