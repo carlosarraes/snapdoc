@@ -41,21 +41,33 @@ func (e *Error) Error() string {
 }
 
 type Artifact struct {
-	ID             string `json:"id"`
-	URL            string `json:"url"`
-	Title          string `json:"title"`
-	Status         string `json:"status"`
-	CurrentVersion int    `json:"current_version"`
-	ContentType    string `json:"content_type"`
-	SizeBytes      int64  `json:"size_bytes"`
-	CreatedAt      string `json:"created_at"`
-	ExpiresAt      string `json:"expires_at"`
+	ID              string `json:"id"`
+	URL             string `json:"url"`
+	Title           string `json:"title"`
+	Status          string `json:"status"`
+	CurrentVersion  int    `json:"current_version"`
+	ContentType     string `json:"content_type"`
+	SizeBytes       int64  `json:"size_bytes"`
+	CreatedAt       string `json:"created_at"`
+	ExpiresAt       string `json:"expires_at"`
 	HasPasscode     bool   `json:"has_passcode"`
 	CommentsEnabled bool   `json:"comments_enabled"`
 	TokenName       string `json:"token_name,omitempty"`
 	// UnresolvedRefs is set on a multipart publish: local image refs the server
 	// could not match to an uploaded file (left as-is in the document).
 	UnresolvedRefs []string `json:"unresolved_refs,omitempty"`
+	// Video-only fields, additive: present when Kind == "video".
+	Kind             string  `json:"kind,omitempty"`
+	FileURL          string  `json:"file_url,omitempty"`
+	VersionURL       string  `json:"version_url,omitempty"`
+	VersionFileURL   string  `json:"version_file_url,omitempty"`
+	PosterURL        *string `json:"poster_url,omitempty"`
+	VersionPosterURL *string `json:"version_poster_url,omitempty"`
+	DurationMs       int64   `json:"duration_ms,omitempty"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	VideoCodec       string  `json:"video_codec,omitempty"`
+	AudioCodec       *string `json:"audio_codec,omitempty"`
 }
 
 type Asset struct {
@@ -71,6 +83,18 @@ type Version struct {
 	SizeBytes   int64  `json:"size_bytes"`
 	ContentType string `json:"content_type"`
 	CreatedAt   string `json:"created_at"`
+	// Video-only fields, additive: present when Kind == "video". Mirrors
+	// versionJson in worker/src/http.ts (a narrower set than Artifact's,
+	// since a version has no top-level url/file_url of its own).
+	Kind             string  `json:"kind,omitempty"`
+	VersionURL       string  `json:"version_url,omitempty"`
+	VersionFileURL   string  `json:"version_file_url,omitempty"`
+	VersionPosterURL *string `json:"version_poster_url,omitempty"`
+	DurationMs       int64   `json:"duration_ms,omitempty"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	VideoCodec       string  `json:"video_codec,omitempty"`
+	AudioCodec       *string `json:"audio_codec,omitempty"`
 }
 
 type PublishOptions struct {
@@ -78,6 +102,15 @@ type PublishOptions struct {
 	TTL      string
 	Passcode string
 	Comments bool
+}
+
+// VideoPublishOptions configures a raw MP4 publish/version request. Size is
+// the exact byte length of body and is sent as Content-Length; unlike
+// document publishes, video uploads always declare their length up front so
+// the server can stream straight to storage.
+type VideoPublishOptions struct {
+	Title, TTL, Passcode, Filename string
+	Size                           int64
 }
 
 // AssetFile is a local image to upload alongside a document. Ref is the verbatim
@@ -272,6 +305,51 @@ func (c *Client) publishMultipart(path string, content io.Reader, contentType st
 	return &a, nil
 }
 
+// PublishVideo creates a video artifact from a raw, streamed MP4 body. body
+// is passed straight through to the transport (never buffered); opts.Size
+// must be the exact byte length, sent as Content-Length.
+func (c *Client) PublishVideo(body io.Reader, opts VideoPublishOptions) (*Artifact, error) {
+	return c.publishVideo("/v1/artifacts", body, opts)
+}
+
+func (c *Client) PublishVideoVersion(id string, body io.Reader, opts VideoPublishOptions) (*Artifact, error) {
+	return c.publishVideo("/v1/artifacts/"+url.PathEscape(id)+"/versions", body, opts)
+}
+
+func (c *Client) publishVideo(path string, body io.Reader, opts VideoPublishOptions) (*Artifact, error) {
+	q := url.Values{}
+	if opts.Title != "" {
+		q.Set("title", opts.Title)
+	}
+	if opts.TTL != "" {
+		q.Set("ttl", opts.TTL)
+	}
+	if opts.Filename != "" {
+		q.Set("filename", opts.Filename)
+	}
+	var headers map[string]string
+	if opts.Passcode != "" {
+		headers = map[string]string{"X-Snapdoc-Passcode": opts.Passcode}
+	}
+	var a Artifact
+	if err := c.doStream("POST", path, q, body, "video/mp4", opts.Size, headers, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UploadVideoPoster replaces a video version's poster/thumbnail image. body
+// is streamed with an explicit Content-Length, never buffered client-side;
+// contentType must be image/jpeg or image/png (server-enforced).
+func (c *Client) UploadVideoPoster(id string, version int, body io.Reader, contentType string, size int64) (*Version, error) {
+	path := "/v1/artifacts/" + url.PathEscape(id) + "/versions/" + strconv.Itoa(version) + "/poster"
+	var v Version
+	if err := c.doStream("PUT", path, nil, body, contentType, size, nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 func (c *Client) List(opts ListOptions) (*ListResult, error) {
 	q := url.Values{}
 	if opts.Status != "" {
@@ -419,13 +497,34 @@ func (c *Client) do(method, path string, q url.Values, body io.Reader, contentTy
 }
 
 func (c *Client) doH(method, path string, q url.Values, body io.Reader, contentType string, headers map[string]string, out any) error {
+	req, err := c.newRequest(method, path, q, body, contentType, headers)
+	if err != nil {
+		return err
+	}
+	return c.send(req, out)
+}
+
+// doStream is the streaming variant used by raw video/image uploads: it sets
+// req.ContentLength explicitly (a plain io.Reader carries no length Go can
+// infer) and passes body straight to http.NewRequest, never copying it into
+// a buffer first, so the transport streams it to the connection as read.
+func (c *Client) doStream(method, path string, q url.Values, body io.Reader, contentType string, size int64, headers map[string]string, out any) error {
+	req, err := c.newRequest(method, path, q, body, contentType, headers)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	return c.send(req, out)
+}
+
+func (c *Client) newRequest(method, path string, q url.Values, body io.Reader, contentType string, headers map[string]string) (*http.Request, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
 	req, err := http.NewRequest(method, u, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -436,6 +535,10 @@ func (c *Client) doH(method, path string, q url.Values, body io.Reader, contentT
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	return req, nil
+}
+
+func (c *Client) send(req *http.Request, out any) error {
 	httpClient := c.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient

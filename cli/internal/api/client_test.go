@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,14 +25,58 @@ const artifactJSON = `{
 	"expires_at": "2026-06-26T15:04:05Z"
 }`
 
+const videoArtifactJSON = `{
+	"id": "v7Kp9qWm2AbCdE",
+	"kind": "video",
+	"url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE",
+	"file_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/file.mp4",
+	"version_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/v/1",
+	"version_file_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/v/1/file.mp4",
+	"poster_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/poster.jpg",
+	"version_poster_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/v/1/poster.jpg",
+	"title": "Checkout flow",
+	"status": "active",
+	"current_version": 1,
+	"content_type": "video/mp4",
+	"size_bytes": 5242880,
+	"duration_ms": 12345,
+	"width": 1920,
+	"height": 1080,
+	"video_codec": "h264",
+	"audio_codec": "aac",
+	"created_at": "2026-06-12T15:04:05Z",
+	"expires_at": "2026-06-26T15:04:05Z"
+}`
+
+// videoVersionJSON has a null version_poster_url and audio_codec, exercising
+// the nullable-media-field decode path (a silent video, or one whose poster
+// hasn't been generated/uploaded yet).
+const videoVersionJSON = `{
+	"version": 2,
+	"size_bytes": 7340032,
+	"content_type": "video/mp4",
+	"created_at": "2026-06-13T10:00:00Z",
+	"kind": "video",
+	"version_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/v/2",
+	"version_file_url": "https://snapdoc.carraes.dev/v7Kp9qWm2AbCdE/v/2/file.mp4",
+	"version_poster_url": null,
+	"duration_ms": 20000,
+	"width": 1280,
+	"height": 720,
+	"video_codec": "vp9",
+	"audio_codec": null
+}`
+
 // capture records the last request the client sent.
 type capture struct {
-	method string
-	path   string
-	query  string
-	auth   string
-	ctype  string
-	body   string
+	method        string
+	path          string
+	query         string
+	auth          string
+	ctype         string
+	body          string
+	passcode      string
+	contentLength int64
 }
 
 func contractServer(t *testing.T, cap *capture, status int, respBody string, header map[string]string) *httptest.Server {
@@ -39,12 +84,14 @@ func contractServer(t *testing.T, cap *capture, status int, respBody string, hea
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		*cap = capture{
-			method: r.Method,
-			path:   r.URL.Path,
-			query:  r.URL.RawQuery,
-			auth:   r.Header.Get("Authorization"),
-			ctype:  r.Header.Get("Content-Type"),
-			body:   string(b),
+			method:        r.Method,
+			path:          r.URL.Path,
+			query:         r.URL.RawQuery,
+			auth:          r.Header.Get("Authorization"),
+			ctype:         r.Header.Get("Content-Type"),
+			body:          string(b),
+			passcode:      r.Header.Get("X-Snapdoc-Passcode"),
+			contentLength: r.ContentLength,
 		}
 		for k, v := range header {
 			w.Header().Set(k, v)
@@ -53,6 +100,28 @@ func contractServer(t *testing.T, cap *capture, status int, respBody string, hea
 		w.WriteHeader(status)
 		io.WriteString(w, respBody)
 	}))
+}
+
+// spyReader counts bytes read so far. A custom RoundTripper checks this count
+// the instant it is invoked — i.e. exactly when the client hands the request
+// to the transport — to prove the client never drained the reader into a
+// buffer beforehand (which the existing multipart/document path does, via
+// io.Copy/io.ReadAll into a bytes.Buffer before ever building the request).
+type spyReader struct {
+	r    io.Reader
+	read int
+}
+
+func (s *spyReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	s.read += n
+	return n, err
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestPublish(t *testing.T) {
@@ -119,6 +188,222 @@ func TestPublishVersion(t *testing.T) {
 	}
 	if cap.query != "ttl=12h" {
 		t.Errorf("query = %q, want ttl=12h", cap.query)
+	}
+}
+
+func TestPublishVideo(t *testing.T) {
+	var cap capture
+	srv := contractServer(t, &cap, 201, videoArtifactJSON, nil)
+	defer srv.Close()
+
+	payload := []byte("fake-mp4-bytes-0123456789")
+	c := &Client{BaseURL: srv.URL, Token: "sd_live_abc"}
+	a, err := c.PublishVideo(bytes.NewReader(payload), VideoPublishOptions{
+		Title:    "Checkout flow",
+		TTL:      "7d",
+		Passcode: "hunter2",
+		Filename: "checkout flow.mp4",
+		Size:     int64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("PublishVideo() error = %v", err)
+	}
+
+	if cap.method != "POST" || cap.path != "/v1/artifacts" {
+		t.Errorf("request = %s %s, want POST /v1/artifacts", cap.method, cap.path)
+	}
+	if cap.ctype != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4", cap.ctype)
+	}
+	if cap.contentLength != int64(len(payload)) {
+		t.Errorf("Content-Length = %d, want %d", cap.contentLength, len(payload))
+	}
+	if cap.body != string(payload) {
+		t.Errorf("body = %q, want %q", cap.body, payload)
+	}
+	if cap.auth != "Bearer sd_live_abc" {
+		t.Errorf("Authorization = %q, want Bearer sd_live_abc", cap.auth)
+	}
+	if cap.passcode != "hunter2" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want hunter2", cap.passcode)
+	}
+	for _, want := range []string{"title=Checkout+flow", "ttl=7d", "filename=checkout+flow.mp4"} {
+		if !strings.Contains(cap.query, want) {
+			t.Errorf("query %q missing %q", cap.query, want)
+		}
+	}
+
+	if a.Kind != "video" || a.FileURL == "" || a.VersionURL == "" || a.VersionFileURL == "" {
+		t.Errorf("video url fields = %+v", a)
+	}
+	if a.PosterURL == nil || *a.PosterURL == "" || a.VersionPosterURL == nil || *a.VersionPosterURL == "" {
+		t.Errorf("poster url fields = %+v", a)
+	}
+	if a.DurationMs != 12345 || a.Width != 1920 || a.Height != 1080 {
+		t.Errorf("dimensions = %+v", a)
+	}
+	if a.VideoCodec != "h264" || a.AudioCodec == nil || *a.AudioCodec != "aac" {
+		t.Errorf("codecs = %+v", a)
+	}
+}
+
+func TestPublishVideoOmitsEmptyParams(t *testing.T) {
+	var cap capture
+	srv := contractServer(t, &cap, 201, videoArtifactJSON, nil)
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "t"}
+	payload := []byte("x")
+	if _, err := c.PublishVideo(bytes.NewReader(payload), VideoPublishOptions{Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if cap.query != "" {
+		t.Errorf("query = %q, want empty", cap.query)
+	}
+	if cap.passcode != "" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want empty", cap.passcode)
+	}
+}
+
+func TestPublishVideoDoesNotBufferBody(t *testing.T) {
+	payload := []byte("streamed-mp4-bytes-must-not-be-buffered")
+	spy := &spyReader{r: bytes.NewReader(payload)}
+
+	var readsAtDispatch int
+	var gotContentLength int64
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		// Captured the instant the transport is handed the request: if the
+		// client had pre-drained the reader (e.g. by reusing the multipart
+		// path's io.Copy-into-bytes.Buffer trick), spy.read would already
+		// equal len(payload) here instead of 0.
+		readsAtDispatch = spy.read
+		gotContentLength = req.ContentLength
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if string(b) != string(payload) {
+			t.Errorf("transport saw body %q, want %q", b, payload)
+		}
+		return &http.Response{
+			StatusCode: 201,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(videoArtifactJSON)),
+		}, nil
+	})
+
+	c := &Client{BaseURL: "http://video.invalid", Token: "t", HTTP: &http.Client{Transport: rt}}
+	if _, err := c.PublishVideo(spy, VideoPublishOptions{Size: int64(len(payload))}); err != nil {
+		t.Fatalf("PublishVideo() error = %v", err)
+	}
+
+	if readsAtDispatch != 0 {
+		t.Errorf("reader had %d/%d bytes already read when dispatched to the transport, want 0 (body must stream, not buffer)", readsAtDispatch, len(payload))
+	}
+	if gotContentLength != int64(len(payload)) {
+		t.Errorf("req.ContentLength = %d, want %d", gotContentLength, len(payload))
+	}
+}
+
+func TestPublishVideoVersion(t *testing.T) {
+	var cap capture
+	srv := contractServer(t, &cap, 201, videoArtifactJSON, nil)
+	defer srv.Close()
+
+	payload := []byte("more-mp4-bytes-for-a-new-version")
+	c := &Client{BaseURL: srv.URL, Token: "t"}
+	if _, err := c.PublishVideoVersion("v7Kp9qWm2AbCdE", bytes.NewReader(payload), VideoPublishOptions{TTL: "12h", Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if cap.method != "POST" || cap.path != "/v1/artifacts/v7Kp9qWm2AbCdE/versions" {
+		t.Errorf("request = %s %s, want POST /v1/artifacts/v7Kp9qWm2AbCdE/versions", cap.method, cap.path)
+	}
+	if cap.ctype != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4", cap.ctype)
+	}
+	if cap.query != "ttl=12h" {
+		t.Errorf("query = %q, want ttl=12h", cap.query)
+	}
+	if cap.contentLength != int64(len(payload)) {
+		t.Errorf("Content-Length = %d, want %d", cap.contentLength, len(payload))
+	}
+	if cap.body != string(payload) {
+		t.Errorf("body = %q, want %q", cap.body, payload)
+	}
+}
+
+func TestUploadVideoPoster(t *testing.T) {
+	var cap capture
+	srv := contractServer(t, &cap, 200, videoVersionJSON, nil)
+	defer srv.Close()
+
+	payload := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46}
+	c := &Client{BaseURL: srv.URL, Token: "t"}
+	v, err := c.UploadVideoPoster("v7Kp9qWm2AbCdE", 2, bytes.NewReader(payload), "image/jpeg", int64(len(payload)))
+	if err != nil {
+		t.Fatalf("UploadVideoPoster() error = %v", err)
+	}
+
+	if cap.method != "PUT" || cap.path != "/v1/artifacts/v7Kp9qWm2AbCdE/versions/2/poster" {
+		t.Errorf("request = %s %s, want PUT /v1/artifacts/v7Kp9qWm2AbCdE/versions/2/poster", cap.method, cap.path)
+	}
+	if cap.ctype != "image/jpeg" {
+		t.Errorf("Content-Type = %q, want image/jpeg", cap.ctype)
+	}
+	if cap.contentLength != int64(len(payload)) {
+		t.Errorf("Content-Length = %d, want %d", cap.contentLength, len(payload))
+	}
+	if cap.body != string(payload) {
+		t.Errorf("body mismatch: got %q want %q", cap.body, payload)
+	}
+
+	if v.Kind != "video" || v.Version != 2 || v.VersionURL == "" || v.VersionFileURL == "" {
+		t.Errorf("version fields = %+v", v)
+	}
+	if v.VersionPosterURL != nil {
+		t.Errorf("VersionPosterURL = %v, want nil (server sent null)", *v.VersionPosterURL)
+	}
+	if v.AudioCodec != nil {
+		t.Errorf("AudioCodec = %v, want nil (server sent null)", *v.AudioCodec)
+	}
+	if v.DurationMs != 20000 || v.Width != 1280 || v.Height != 720 || v.VideoCodec != "vp9" {
+		t.Errorf("media fields = %+v", v)
+	}
+}
+
+func TestUploadVideoPosterDoesNotBufferBody(t *testing.T) {
+	payload := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46}
+	spy := &spyReader{r: bytes.NewReader(payload)}
+
+	var readsAtDispatch int
+	var gotContentLength int64
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		readsAtDispatch = spy.read
+		gotContentLength = req.ContentLength
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(b, payload) {
+			t.Errorf("transport saw body %x, want %x", b, payload)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(videoVersionJSON)),
+		}, nil
+	})
+
+	c := &Client{BaseURL: "http://video.invalid", Token: "t", HTTP: &http.Client{Transport: rt}}
+	if _, err := c.UploadVideoPoster("v7Kp9qWm2AbCdE", 2, spy, "image/jpeg", int64(len(payload))); err != nil {
+		t.Fatalf("UploadVideoPoster() error = %v", err)
+	}
+
+	if readsAtDispatch != 0 {
+		t.Errorf("reader had %d/%d bytes already read when dispatched to the transport, want 0 (body must stream, not buffer)", readsAtDispatch, len(payload))
+	}
+	if gotContentLength != int64(len(payload)) {
+		t.Errorf("req.ContentLength = %d, want %d", gotContentLength, len(payload))
 	}
 }
 
