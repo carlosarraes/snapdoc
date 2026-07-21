@@ -369,6 +369,10 @@ async function uploadVideoPoster(
   c: Context<ApiContext, "/artifacts/:id/versions/:version/poster">,
 ): Promise<Response> {
   const store = c.get("store");
+  const token = c.get("token");
+  const rateLimited = await enforceRateLimit(store, token.id, c.env);
+  if (rateLimited) return rateLimited;
+
   const id = c.req.param("id");
   const version = Number(c.req.param("version"));
   if (!Number.isInteger(version) || version < 1) {

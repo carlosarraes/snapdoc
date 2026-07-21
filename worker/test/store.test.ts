@@ -810,6 +810,19 @@ describe("video artifacts", () => {
     });
   });
 
+  it("rejects a poster upload on a deleted video, leaving no new R2 key", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await makeVideoArtifact(store, tok.id);
+    await store.deleteArtifact(art.id);
+
+    await expect(store.setVideoPoster(art.id, art.currentVersion, JPEG_BYTES, "image/jpeg")).rejects.toMatchObject({
+      code: "not_active",
+    });
+    const listing = await env.BLOBS.list({ prefix: `artifacts/${art.id}/v${art.currentVersion}/poster-` });
+    expect(listing.objects).toHaveLength(0);
+  });
+
   it("rejects a poster for a nonexistent version of an existing video artifact", async () => {
     const store = makeStore();
     const tok = await makeToken(store);

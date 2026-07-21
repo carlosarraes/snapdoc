@@ -813,6 +813,7 @@ export class Store {
   ): Promise<VideoVersionMetadata> {
     const artifact = await this.fetchArtifact(id);
     if (!artifact) throw new StoreError("not_found", "Artifact not found.");
+    if (artifact.status !== "active") throw new StoreError("not_active", "Artifact is not active.");
     if (artifact.kind !== "video") throw new StoreError("kind_mismatch", "Posters only apply to video artifacts.");
     const existing = await this.fetchVideoVersion(id, version);
     if (!existing) throw new StoreError("not_found", "Video version not found.");

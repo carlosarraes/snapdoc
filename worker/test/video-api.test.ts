@@ -8,6 +8,7 @@ import {
   mintToken,
   publish,
   publishVideo,
+  store,
   unsupportedCodecVideoFixtureBytes,
   uploadPoster,
   videoFixtureBytes,
@@ -317,6 +318,17 @@ describe("PUT /v1/artifacts/{id}/versions/{version}/poster", () => {
     const doc = (await (await publish({ token: tok.token })).json()) as { id: string };
     const res = await uploadPoster({ token: tok.token, id: doc.id, version: 1, bytes: JPEG_BYTES });
     await expectError(res, 400, "kind_mismatch");
+  });
+
+  it("returns 429 with Retry-After when over the publish rate limit, same as the POST handlers", async () => {
+    const tok = await mintToken();
+    const created = (await (await publishVideo({ token: tok.token })).json()) as VideoArtifactJson;
+    for (let i = 0; i < 100; i++) await store().recordPublish(tok.id);
+    const res = await uploadPoster({ token: tok.token, id: created.id, version: 1, bytes: JPEG_BYTES });
+    await expectError(res, 429, "rate_limited");
+    const retryAfter = Number(res.headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(3600);
   });
 });
 
