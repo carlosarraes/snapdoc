@@ -5,6 +5,7 @@
 // (sandboxed) frame; this page holds the rail + viewer cookie.
 import type { Context } from "hono";
 import { escapeHtml } from "./markdown";
+import { fetchStaticAsset } from "./serve";
 import type { Env } from "./types";
 
 const ARTIFACT_ID = /^[A-Za-z0-9_-]{14}$/;
@@ -29,7 +30,7 @@ export async function serveReviewPage(c: Context<{ Bindings: Env }>): Promise<Re
   const id = c.req.param("id");
   // /review/app.js, /review/annotator.js, /review/assets/* are static bundle
   // files, not pages — let the ASSETS binding resolve them.
-  if (!id || !ARTIFACT_ID.test(id)) return c.env.ASSETS.fetch(c.req.raw);
+  if (!id || !ARTIFACT_ID.test(id)) return fetchStaticAsset(c.req.raw, c.env);
 
   // Prod: review page on the API host, doc on the (cross-origin) artifact host, so
   // inject its absolute origin. Dev: wrangler serves both from localhost (and its

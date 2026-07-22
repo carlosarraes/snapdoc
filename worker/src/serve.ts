@@ -37,6 +37,19 @@ const ARTIFACT_CSP = [
   "base-uri 'none'",
 ].join("; ");
 
+// Static-asset fall-through for both hosts. The pinned Mermaid runtime alone
+// gets ACAO: the sandboxed review iframe fetches it CORS-mode from an opaque
+// origin, and SRI cannot validate the response unless it is CORS-readable.
+const MERMAID_RUNTIME_ASSET = /^\/review\/mermaid-[\w.]+\.min\.js$/;
+
+export async function fetchStaticAsset(request: Request, env: Env): Promise<Response> {
+  const response = await env.ASSETS.fetch(request);
+  if (!response.ok || !MERMAID_RUNTIME_ASSET.test(new URL(request.url).pathname)) return response;
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 function artifactCsp(html: string, requestUrl: string): string {
   if (!html.includes(MERMAID_DOCUMENT_MARKER)) return ARTIFACT_CSP;
   const runtimeUrl = new URL(MERMAID_RUNTIME_PATH, requestUrl).toString();
@@ -96,6 +109,15 @@ async function injectAnnotator(html: string): Promise<string> {
   const tag = `<script src="/review/annotator.js" defer></script>`;
   let bodySeen = false;
   const rewriter = new HTMLRewriter()
+    .on(`script[src^="/review/mermaid-"]`, {
+      // The review iframe is sandboxed without allow-same-origin, so its
+      // origin is opaque and the runtime fetch is cross-origin; SRI rejects
+      // the tainted no-CORS response unless the tag opts into CORS mode.
+      // Stamped here so artifacts published before the fix work unmodified.
+      element(el) {
+        el.setAttribute("crossorigin", "anonymous");
+      },
+    })
     .on("body", {
       element(el) {
         bodySeen = true;
@@ -551,7 +573,7 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
   }
 
   const match = ID_PATTERN.exec(url.pathname);
-  if (!match) return env.ASSETS.fetch(request);
+  if (!match) return fetchStaticAsset(request, env);
 
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });

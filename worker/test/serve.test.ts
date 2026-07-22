@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ARTIFACT_BASE, HTML_BODY, mintToken, publish, publishVideo, store } from "./helpers";
+import { API_BASE, ARTIFACT_BASE, HTML_BODY, mintToken, publish, publishVideo, store } from "./helpers";
 
 async function publishedId(opts: { body?: string; title?: string } = {}): Promise<string> {
   const tok = await mintToken();
@@ -175,6 +175,45 @@ describe("annotate mode", () => {
     expect(html).toContain('/review/mermaid-11.15.0.min.js');
     expect(html).toContain('/review/annotator.js');
     expect(res.headers.get("Content-Security-Policy")).toContain("script-src 'unsafe-inline' 'self'");
+  });
+
+  it("retrofits crossorigin onto legacy Mermaid runtime tags in annotate mode", async () => {
+    // Artifacts published before the crossorigin fix have the bare tag baked
+    // into their stored HTML; the review iframe's opaque origin makes SRI
+    // reject the non-CORS response, so annotate mode must add the attribute.
+    const legacyHtml =
+      '<html><head><script src="/review/mermaid-11.15.0.min.js" integrity="sha384-yQ4mmBBT+vhTAwjFH0toJXNYJ6O4usWnt6EPIdWwrRvx2V/n5lXuDZQwQFeSFydF" defer></script></head><body><p>doc</p></body></html>';
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, comments: true, body: legacyHtml })
+    ).json()) as { id: string };
+
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
+    const html = await res.text();
+    expect(html).toMatch(/<script src="\/review\/mermaid-[^"]+"[^>]*crossorigin="anonymous"/);
+
+    // The canonical page stays byte-for-byte what the owner published.
+    const plain = await SELF.fetch(`${ARTIFACT_BASE}/${id}`);
+    expect(await plain.text()).toBe(legacyHtml);
+  });
+});
+
+describe("mermaid runtime asset", () => {
+  // The review iframe is sandboxed without allow-same-origin, so its runtime
+  // fetch is cross-origin from an opaque origin; SRI needs a CORS-readable
+  // response, which requires ACAO on the asset itself.
+  it("serves the runtime with Access-Control-Allow-Origin on both hosts", async () => {
+    for (const base of [ARTIFACT_BASE, API_BASE]) {
+      const res = await SELF.fetch(`${base}/review/mermaid-11.15.0.min.js`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    }
+  });
+
+  it("does not add ACAO to other static assets", async () => {
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/review/annotator.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 });
 

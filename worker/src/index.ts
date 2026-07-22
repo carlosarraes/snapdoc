@@ -3,7 +3,7 @@ import { createPublisherApp, mapStoreError } from "./api";
 import { createAdminApp } from "./admin-api";
 import { createReaderApp } from "./reader-api";
 import { serveReviewPage } from "./review";
-import { serveArtifactHost } from "./serve";
+import { fetchStaticAsset, serveArtifactHost } from "./serve";
 import { Store } from "./store";
 import { errorResponse } from "./http";
 import type { Env } from "./types";
@@ -21,7 +21,7 @@ apiApp.notFound((c) => {
     return errorResponse("not_found", "Unknown API route.");
   }
   // Dashboard and other static assets on the API host.
-  return c.env.ASSETS.fetch(c.req.raw);
+  return fetchStaticAsset(c.req.raw, c.env);
 });
 
 function isApiRequest(url: URL, env: Env): boolean {

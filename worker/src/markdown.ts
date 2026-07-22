@@ -252,7 +252,7 @@ export async function renderMarkdown(
 <meta name="robots" content="noindex, nofollow">
 ${mermaidCount > 0 ? `${MERMAID_DOCUMENT_MARKER}\n` : ""}<title>${safeTitle}</title>
 <style>${THEME_CSS}</style>
-${mermaidCount > 0 ? `<script src="${MERMAID_RUNTIME_PATH}" integrity="${MERMAID_RUNTIME_INTEGRITY}" defer></script>\n${MERMAID_BOOTSTRAP}` : ""}
+${mermaidCount > 0 ? `<script src="${MERMAID_RUNTIME_PATH}" integrity="${MERMAID_RUNTIME_INTEGRITY}" crossorigin="anonymous" defer></script>\n${MERMAID_BOOTSTRAP}` : ""}
 </head>
 <body>
 ${tocHtml}${rendered}</body>

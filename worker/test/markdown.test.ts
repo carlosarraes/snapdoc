@@ -42,6 +42,9 @@ describe("renderMarkdown", () => {
     expect(html).not.toContain('<img src=x onerror=alert(1)>');
     expect(html).toContain('/review/mermaid-11.15.0.min.js');
     expect(html).toContain('integrity="sha384-yQ4mmBBT+vhTAwjFH0toJXNYJ6O4usWnt6EPIdWwrRvx2V/n5lXuDZQwQFeSFydF"');
+    // SRI in the sandboxed review iframe (opaque origin) needs a CORS-mode
+    // fetch, or the integrity check rejects the tainted response outright.
+    expect(html).toMatch(/<script src="\/review\/mermaid-[^"]+" integrity="[^"]+" crossorigin="anonymous" defer>/);
     expect(html).toContain("securityLevel: \"strict\"");
     expect(html).toContain("htmlLabels: false");
   });
