@@ -472,9 +472,10 @@ intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there
 ## Reader endpoints (public review page)
 
 When an artifact has `comments_enabled`, anyone with the link can comment on
-specific text via a trusted first-party **review page** — no account. These live
-on the API host, are **unauthenticated**, and never expose team comments or
-internal fields. Author identity is pseudonymous (a typed display name + optional
+specific text via a trusted first-party **review page** — no account. These
+answer on **both hosts** — prefer the artifact host (`/review/{id}` next to the
+artifact itself); the API host serves the same page for older links. They are
+**unauthenticated** and never expose team comments or internal fields. Author identity is pseudonymous (a typed display name + optional
 unverified email). Writes are gated by the owner's opt-in and rate-limited per-IP
 and per-artifact.
 

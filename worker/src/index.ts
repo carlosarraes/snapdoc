@@ -26,7 +26,17 @@ apiApp.notFound((c) => {
 
 function isApiRequest(url: URL, env: Env): boolean {
   if (url.hostname === env.API_HOST) return true;
-  if (url.hostname === env.ARTIFACT_HOST) return false;
+  if (url.hostname === env.ARTIFACT_HOST) {
+    // The public review page also answers on the artifact origin (pretty
+    // /review/<id> links). Its rail calls the reader API with relative
+    // same-origin paths, so that public slice of /v1 rides along; the
+    // Bearer-gated publisher and Access-gated admin APIs stay API-host only.
+    return (
+      url.pathname === "/review" ||
+      url.pathname.startsWith("/review/") ||
+      url.pathname.startsWith("/v1/reader/")
+    );
+  }
   // wrangler dev fallback (single localhost host): route by path.
   return (
     url.pathname.startsWith("/v1/") ||

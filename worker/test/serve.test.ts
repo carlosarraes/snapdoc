@@ -217,6 +217,32 @@ describe("mermaid runtime asset", () => {
   });
 });
 
+describe("review page on the artifact host", () => {
+  it("serves the review page and the reader API at the artifact origin", async () => {
+    const tok = await mintToken();
+    const { id } = (await (await publish({ token: tok.token, comments: true })).json()) as { id: string };
+
+    const page = await SELF.fetch(`${ARTIFACT_BASE}/review/${id}`);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain(`data-artifact-id="${id}"`);
+    // Same-origin serving: the rail falls back to location.origin for the doc.
+    expect(html).toContain('data-artifact-origin=""');
+
+    // The rail's relative /v1/reader calls must resolve on this origin too.
+    const meta = await SELF.fetch(`${ARTIFACT_BASE}/v1/reader/artifacts/${id}`);
+    expect(meta.status).toBe(200);
+    expect(((await meta.json()) as { id: string }).id).toBe(id);
+  });
+
+  it("keeps publisher and admin APIs off the artifact host", async () => {
+    for (const path of ["/v1/artifacts", "/v1/admin/tokens"]) {
+      const res = await SELF.fetch(`${ARTIFACT_BASE}${path}`);
+      expect(res.status).toBe(404);
+    }
+  });
+});
+
 describe("favicon fallback", () => {
   // Artifacts rarely declare an icon, so browsers request /favicon.ico on the
   // artifact host; answer with the snapdoc logo instead of a 404 globe.

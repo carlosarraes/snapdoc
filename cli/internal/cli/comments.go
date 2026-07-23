@@ -111,14 +111,19 @@ func setComments(g *Globals, streams *IO, id string, enabled bool) error {
 		return writeJSON(streams.Stdout, a)
 	}
 	if enabled {
-		fmt.Fprintf(streams.Stdout, "Reader comments enabled for %s.\n  Review: %s\n", a.ID, reviewURL(client.BaseURL, a.ID))
+		fmt.Fprintf(streams.Stdout, "Reader comments enabled for %s.\n  Review: %s\n", a.ID, reviewURL(a.URL, client.BaseURL, a.ID))
 	} else {
 		fmt.Fprintf(streams.Stdout, "Reader comments disabled for %s.\n", a.ID)
 	}
 	return nil
 }
 
-// reviewURL is the public review page for an artifact, on the API host.
-func reviewURL(baseURL, id string) string {
+// reviewURL is the public review page for an artifact. It lives on the same
+// origin as the artifact itself, so derive it from the artifact URL and fall
+// back to the API host only when the response carries no usable URL.
+func reviewURL(artifactURL, baseURL, id string) string {
+	if u, err := url.Parse(artifactURL); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host + "/review/" + url.PathEscape(id)
+	}
 	return strings.TrimRight(baseURL, "/") + "/review/" + url.PathEscape(id)
 }
