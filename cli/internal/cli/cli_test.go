@@ -1838,3 +1838,42 @@ func TestReadPasscodeRequiredNonTTYSurfacesError(t *testing.T) {
 		t.Errorf("made %d requests, want 1 (no prompt retry when non-interactive)", len(srv.reqs))
 	}
 }
+
+func TestCommentsFiltersOrphanedByDefault(t *testing.T) {
+	dir := setupEnv(t)
+	body := `{"artifact_id":"x","comments":[` +
+		`{"id":"cmt_gone","author":"ana","version":1,"body":"stale note","created_at":"t1","parent_id":null,"orphaned":true,"anchor":{"exact":"old text","prefix":"","suffix":"","start":0,"end":8}},` +
+		`{"id":"cmt_gone_reply","author":"bo","version":1,"body":"stale reply","created_at":"t2","parent_id":"cmt_gone"},` +
+		`{"id":"cmt_live","author":"ana","version":1,"body":"fresh note","created_at":"t3","parent_id":null,"orphaned":false,"anchor":{"exact":"kept","prefix":"","suffix":"","start":0,"end":4}}` +
+		`]}`
+	srv := okServer(t, 200, body)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+
+	stdout, _, code := runCLI([]string{"comments", "x"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Contains(stdout, "stale note") || strings.Contains(stdout, "stale reply") {
+		t.Errorf("orphaned thread should be hidden by default:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "fresh note") {
+		t.Errorf("live thread missing:\n%s", stdout)
+	}
+
+	stdout, _, code = runCLI([]string{"comments", "x", "--include-orphaned"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "stale note") || !strings.Contains(stdout, "[orphaned]") {
+		t.Errorf("expected orphaned thread with marker:\n%s", stdout)
+	}
+
+	stdout, _, code = runCLI([]string{"comments", "x", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Contains(stdout, "cmt_gone") {
+		t.Errorf("JSON output should filter orphaned threads by default:\n%s", stdout)
+	}
+}

@@ -165,6 +165,9 @@ type Comment struct {
 	// Set on reader (anon) comments: the unverified email and the text anchor.
 	AuthorEmail *string `json:"author_email"`
 	Anchor      *Anchor `json:"anchor"`
+	// Set on anchored roots: true when the quoted text no longer appears in
+	// the artifact's current version.
+	Orphaned *bool `json:"orphaned,omitempty"`
 }
 
 type CommentsResult struct {

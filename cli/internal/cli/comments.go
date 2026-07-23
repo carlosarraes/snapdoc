@@ -18,8 +18,9 @@ type CommentsCmd struct {
 }
 
 type CommentsReadCmd struct {
-	ID     string `arg:"" help:"Artifact id."`
-	Status string `short:"s" help:"Filter threads by status: open or resolved (default shows all)."`
+	ID              string `arg:"" help:"Artifact id."`
+	Status          string `short:"s" help:"Filter threads by status: open or resolved (default shows all)."`
+	IncludeOrphaned bool   `short:"o" help:"Include threads whose quoted text no longer appears in the current version."`
 }
 
 func (c *CommentsReadCmd) Run(g *Globals, streams *IO) error {
@@ -30,6 +31,9 @@ func (c *CommentsReadCmd) Run(g *Globals, streams *IO) error {
 	res, err := client.ListComments(c.ID, c.Status)
 	if err != nil {
 		return err
+	}
+	if !c.IncludeOrphaned {
+		res.Comments = dropOrphanedThreads(res.Comments)
 	}
 	if g.JSON {
 		return writeJSON(streams.Stdout, res)
@@ -49,6 +53,9 @@ func (c *CommentsReadCmd) Run(g *Globals, streams *IO) error {
 					marker += " by " + *cm.ResolvedBy
 				}
 				marker += "]"
+			}
+			if cm.Orphaned != nil && *cm.Orphaned {
+				marker += " [orphaned]"
 			}
 			fmt.Fprintf(streams.Stdout, "%s%s · v%d · %s%s\n", cm.Author, provenance(cm), cm.Version, cm.CreatedAt, marker)
 			if cm.Anchor != nil {
@@ -96,6 +103,29 @@ type CommentsDisableCmd struct {
 
 func (c *CommentsDisableCmd) Run(g *Globals, streams *IO) error {
 	return setComments(g, streams, c.ID, false)
+}
+
+// dropOrphanedThreads removes threads whose anchor no longer matches the
+// current version (root and replies). Stale feedback is noise for agents
+// iterating on the latest version; --include-orphaned brings it back.
+func dropOrphanedThreads(comments []api.Comment) []api.Comment {
+	orphanedRoots := make(map[string]bool)
+	for _, cm := range comments {
+		if cm.ParentID == nil && cm.Orphaned != nil && *cm.Orphaned {
+			orphanedRoots[cm.ID] = true
+		}
+	}
+	if len(orphanedRoots) == 0 {
+		return comments
+	}
+	kept := comments[:0]
+	for _, cm := range comments {
+		if orphanedRoots[cm.ID] || (cm.ParentID != nil && orphanedRoots[*cm.ParentID]) {
+			continue
+		}
+		kept = append(kept, cm)
+	}
+	return kept
 }
 
 func setComments(g *Globals, streams *IO, id string, enabled bool) error {

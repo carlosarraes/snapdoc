@@ -173,3 +173,71 @@ describe("comments", () => {
     await expectError(await setResolved("cmt_nope", true), 404, "not_found");
   });
 });
+
+describe("orphaned detection on the token read", () => {
+  async function postAnchored(id: string, exact: string, extra: Record<string, unknown> = {}) {
+    return SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        author_name: "Ana",
+        body: "feedback",
+        anchor: { exact, prefix: "", suffix: "", start: 0, end: exact.length },
+        ...extra,
+      }),
+    });
+  }
+
+  it("flags anchored threads whose text no longer matches the current version", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, contentType: "text/markdown", body: "The quick brown fox jumps.", comments: true })
+    ).json()) as { id: string };
+    await postAnchored(id, "brown fox");
+
+    let json = (await (await readComments(id, tok.token)).json()) as { comments: (CommentJson & { orphaned?: boolean })[] };
+    expect(json.comments[0].orphaned).toBe(false);
+
+    await publish({ token: tok.token, id, contentType: "text/markdown", body: "A red panda naps." });
+    json = (await (await readComments(id, tok.token)).json()) as { comments: (CommentJson & { orphaned?: boolean })[] };
+    expect(json.comments[0].orphaned).toBe(true);
+  });
+
+  it("omits the field on replies and unanchored comments", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, contentType: "text/markdown", body: "Anchor target text.", comments: true })
+    ).json()) as { id: string };
+    const root = (await (await postAnchored(id, "Anchor target")).json()) as { id: string };
+    await postAnchored(id, "ignored", { parent_id: root.id, anchor: undefined });
+    await addComment(id, "team note without anchor");
+
+    const json = (await (await readComments(id, tok.token)).json()) as {
+      comments: (CommentJson & { orphaned?: boolean; anchor: unknown })[];
+    };
+    const rootJson = json.comments.find((c) => c.id === root.id)!;
+    expect(rootJson.orphaned).toBe(false);
+    for (const c of json.comments.filter((cm) => cm.id !== root.id)) {
+      expect(c.orphaned).toBeUndefined();
+    }
+  });
+
+  it("matches decoded text and ignores mermaid source fallback chrome", async () => {
+    const tok = await mintToken();
+    const body = "Compare a < b in code.\n\n```mermaid\nflowchart LR\nA-->B\n```";
+    const { id } = (await (
+      await publish({ token: tok.token, contentType: "text/markdown", body, comments: true })
+    ).json()) as { id: string };
+    // Entities: the stored HTML holds "a &lt; b", the anchor holds "a < b".
+    await postAnchored(id, "a < b");
+    // This text exists only inside the .sd-mermaid-source fallback, which the
+    // review page's flatten() skips — so it must read as orphaned here too.
+    const inChrome = (await (await postAnchored(id, "flowchart LR")).json()) as { id: string };
+
+    const json = (await (await readComments(id, tok.token)).json()) as {
+      comments: (CommentJson & { orphaned?: boolean })[];
+    };
+    expect(json.comments.find((c) => c.id !== inChrome.id)!.orphaned).toBe(false);
+    expect(json.comments.find((c) => c.id === inChrome.id)!.orphaned).toBe(true);
+  });
+});

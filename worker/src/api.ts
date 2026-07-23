@@ -4,6 +4,7 @@ import type { MiddlewareHandler } from "hono";
 import { mintTokenResponse, verifyBootstrapHeader } from "./admin-api";
 import { renderMarkdown } from "./markdown";
 import { htmlToMarkdown } from "./html-to-markdown";
+import { extractDocText } from "./doc-text";
 import { ALLOWED_IMAGE_TYPES, detectImageType } from "./assets";
 import {
   Store,
@@ -591,9 +592,28 @@ export function createPublisherApp(): Hono<ApiContext> {
     const status = parseCommentStatus(c.req.query("status"));
     if (status instanceof Response) return status;
     const { comments, truncated } = await store.listComments(id, status);
+
+    // Anchored roots get an `orphaned` flag: does the quoted text still exist
+    // in the current version? Mirrors the review page's in-browser judgement
+    // so agents can skip stale feedback without rendering anything.
+    const anchoredRoots = comments.filter((cm) => cm.parentId === null && cm.anchor);
+    const orphanedById = new Map<string, boolean>();
+    if (anchoredRoots.length > 0) {
+      const content = await store.getServableContent(id);
+      if (content?.state === "active") {
+        const docText = await extractDocText(content.html);
+        for (const cm of anchoredRoots) orphanedById.set(cm.id, !docText.includes(cm.anchor!.exact));
+      }
+    }
+
     return c.json({
       artifact_id: id,
-      comments: comments.map((cm) => commentJson(cm)),
+      comments: comments.map((cm) => {
+        const json = commentJson(cm);
+        const orphaned = orphanedById.get(cm.id);
+        if (orphaned !== undefined) json.orphaned = orphaned;
+        return json;
+      }),
       ...(truncated ? { truncated: true } : {}),
     });
   });

@@ -338,6 +338,12 @@ images).
   thread-level — `open` returns unresolved roots **and their replies**,
   `resolved` returns resolved roots and their replies. An agent wanting just the
   actionable feedback reads `?status=open`. A bad value is `invalid_request`.
+- Anchored roots additionally carry `orphaned: true|false` — whether the
+  anchor's quoted text still appears in the artifact's **current** version
+  (the same judgement the review page makes when it moves a thread to its
+  Orphaned section). Replies and unanchored comments omit the field. The API
+  returns everything; the CLI drops orphaned threads by default
+  (`--include-orphaned` to keep them).
 - 200 →
 
 ```json
