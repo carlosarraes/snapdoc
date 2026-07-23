@@ -506,6 +506,8 @@ and per-artifact.
   (HttpOnly, Secure, SameSite=Lax) — the self-delete capability. Errors:
   `comments_disabled` (403) when not opted in, `rate_limited` (429) with
   `Retry-After`, `gone` (410), `not_found` (404), `invalid_request` (400).
+  `snapdoc comments reply` posts replies through this endpoint, so agent
+  responses appear in the review page like any reviewer's.
 - `PATCH /v1/reader/comments/{cid}` — resolve or reopen a thread from the review
   page. Body `{ "resolved": true|false, "author_name": "..." }` (name 1–80, used
   for attribution — recorded as `"<name> (reader)"` in `resolved_by` so it can

@@ -92,12 +92,17 @@ COLLECT FEEDBACK (anyone with the link, no account)
   snapdoc publish report.md --comments   # opt in at publish, or later:
   snapdoc comments enable <id>           # prints a /review/<id> link to share
   snapdoc comments disable <id>
+  snapdoc comments reply <id> <comment-id> "answer"   # respond in-thread
   Reviewers highlight text on the review page and comment on the exact span.
   Read it back with the quoted context to drive the next version — reader lines
   show "(reader)" and the quote. Reader comments and --passcode are exclusive.
   Threads whose quoted text no longer appears in the current version are
   dropped from "snapdoc comments" by default (stale feedback); pass
   --include-orphaned (-o) to see them, marked [orphaned].
+  Workflow: read open threads, reply with answers or pushback, then publish
+  the fix as a new version — threads whose text changed are orphaned
+  automatically. NEVER resolve or reopen threads; resolution is a human
+  decision made on the review page.
 
 LIFECYCLE
   snapdoc expire <id>     # make it unavailable now

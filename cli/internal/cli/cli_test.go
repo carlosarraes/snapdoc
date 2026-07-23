@@ -1877,3 +1877,59 @@ func TestCommentsFiltersOrphanedByDefault(t *testing.T) {
 		t.Errorf("JSON output should filter orphaned threads by default:\n%s", stdout)
 	}
 }
+
+func TestCommentsReplyPostsViaReaderAPI(t *testing.T) {
+	dir := setupEnv(t)
+	srv := newFakeServer(t, func(r recordedReq, w http.ResponseWriter) {
+		if r.path == "/v1/whoami" {
+			io.WriteString(w, `{"token":{"id":"tok_1","name":"codex-agent","created_at":"t"}}`)
+			return
+		}
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":"cmt_reply","author":"codex-agent","author_kind":"anon","version":1,"body":"done","created_at":"t","parent_id":"cmt_root","resolved":false}`)
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+
+	stdout, _, code := runCLI([]string{"comments", "reply", "x7Kp9qWm2AbCdE", "cmt_root", "done in v3"}, "")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	// Default name comes from whoami, then the reply posts to the reader API.
+	post := srv.reqs[len(srv.reqs)-1]
+	if post.method != "POST" || post.path != "/v1/reader/artifacts/x7Kp9qWm2AbCdE/comments" {
+		t.Errorf("req = %s %s", post.method, post.path)
+	}
+	for _, want := range []string{`"parent_id":"cmt_root"`, `"author_name":"codex-agent"`, `"body":"done in v3"`} {
+		if !strings.Contains(post.body, want) {
+			t.Errorf("post body missing %s:\n%s", want, post.body)
+		}
+	}
+	if !strings.Contains(stdout, "cmt_root") {
+		t.Errorf("output should confirm the reply:\n%s", stdout)
+	}
+}
+
+func TestCommentsReplyExplicitNameAndStdin(t *testing.T) {
+	dir := setupEnv(t)
+	srv := newFakeServer(t, func(r recordedReq, w http.ResponseWriter) {
+		if r.path == "/v1/whoami" {
+			t.Error("whoami should not be called when --name is given")
+		}
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":"cmt_reply","author":"Codex","author_kind":"anon","version":1,"body":"b","created_at":"t","parent_id":"cmt_root","resolved":false}`)
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+
+	_, _, code := runCLI([]string{"comments", "reply", "x", "cmt_root", "-", "--name", "Codex"}, "fixed in the next version\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	post := srv.reqs[len(srv.reqs)-1]
+	for _, want := range []string{`"author_name":"Codex"`, `"body":"fixed in the next version"`} {
+		if !strings.Contains(post.body, want) {
+			t.Errorf("post body missing %s:\n%s", want, post.body)
+		}
+	}
+}

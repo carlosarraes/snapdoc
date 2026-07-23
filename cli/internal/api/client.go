@@ -429,6 +429,26 @@ func (c *Client) ListComments(id, status string) (*CommentsResult, error) {
 	return &res, nil
 }
 
+// ReplyComment posts a reply to a comment thread through the public reader
+// endpoint, attributed to the given display name. The reader channel is
+// deliberate: agents respond in-thread like any reviewer; resolving threads
+// stays a human action on the review page.
+func (c *Client) ReplyComment(artifactID, parentID, authorName, text string) (*Comment, error) {
+	payload, err := json.Marshal(map[string]string{
+		"author_name": authorName,
+		"body":        text,
+		"parent_id":   parentID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var cm Comment
+	if err := c.do("POST", "/v1/reader/artifacts/"+url.PathEscape(artifactID)+"/comments", nil, bytes.NewReader(payload), "application/json", &cm); err != nil {
+		return nil, err
+	}
+	return &cm, nil
+}
+
 func (c *Client) Delete(id string) (*DeleteResult, error) {
 	var res DeleteResult
 	if err := c.do("DELETE", "/v1/artifacts/"+url.PathEscape(id), nil, nil, "", &res); err != nil {

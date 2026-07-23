@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 // anonymous reader-comment opt-in.
 type CommentsCmd struct {
 	Read    CommentsReadCmd    `cmd:"" default:"withargs" help:"Show comments on an artifact (default)."`
+	Reply   CommentsReplyCmd   `cmd:"" help:"Reply to a comment thread."`
 	Enable  CommentsEnableCmd  `cmd:"" help:"Allow anyone with the link to comment via the review page."`
 	Disable CommentsDisableCmd `cmd:"" help:"Stop allowing reader comments."`
 }
@@ -103,6 +105,52 @@ type CommentsDisableCmd struct {
 
 func (c *CommentsDisableCmd) Run(g *Globals, streams *IO) error {
 	return setComments(g, streams, c.ID, false)
+}
+
+// CommentsReplyCmd answers a thread through the public reader endpoint, so the
+// reply shows up in the review page like any reviewer's. There is deliberately
+// no resolve counterpart: agents respond and publish a new version (which
+// orphans addressed threads automatically); resolving is a human action.
+type CommentsReplyCmd struct {
+	ID        string `arg:"" help:"Artifact id."`
+	CommentID string `arg:"" help:"Comment id of the thread to reply to."`
+	Body      string `arg:"" optional:"" help:"Reply text; '-' or omitted reads stdin."`
+	Name      string `help:"Display name shown on the reply (default: the token's name)."`
+}
+
+func (c *CommentsReplyCmd) Run(g *Globals, streams *IO) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
+	text := c.Body
+	if text == "" || text == "-" {
+		data, err := io.ReadAll(streams.Stdin)
+		if err != nil {
+			return err
+		}
+		text = strings.TrimSpace(string(data))
+	}
+	if text == "" {
+		return fmt.Errorf("reply body is empty")
+	}
+	name := c.Name
+	if name == "" {
+		who, err := client.Whoami()
+		if err != nil {
+			return err
+		}
+		name = who.Token.Name
+	}
+	cm, err := client.ReplyComment(c.ID, c.CommentID, name, text)
+	if err != nil {
+		return err
+	}
+	if g.JSON {
+		return writeJSON(streams.Stdout, cm)
+	}
+	fmt.Fprintf(streams.Stdout, "Replied to %s as %s.\n", c.CommentID, name)
+	return nil
 }
 
 // dropOrphanedThreads removes threads whose anchor no longer matches the
