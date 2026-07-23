@@ -65,6 +65,29 @@ describe("htmlToMarkdown", () => {
     expect(out).toContain("const x = 1 < 2;");
   });
 
+  it("round-trips schema-ref spans back to verbatim code and inline code", async () => {
+    const md = [
+      "```python",
+      "class QuoteResult(BaseModel):",
+      "    id: UUID",
+      "```",
+      "",
+      "```python",
+      "async def get(self) -> QuoteResult: ...",
+      "```",
+      "",
+      "The `QuoteResult` payload is returned as-is.",
+    ].join("\n");
+    const out = await roundTrip(md);
+    expect(out).toContain("class QuoteResult(BaseModel):");
+    expect(out).toContain("async def get(self) -> QuoteResult: ...");
+    expect(out).toContain("`QuoteResult` payload");
+    // No trace of the reference markup or the head payload survives.
+    expect(out).not.toContain("sd-ref");
+    expect(out).not.toContain("<span");
+    expect(out).not.toContain("tabindex");
+  });
+
   it("reconstructs mermaid source without generated figure chrome", async () => {
     const source = "sequenceDiagram\n  Browser->>API: GET /deals\n  API-->>Browser: 200 OK";
     const out = htmlToMarkdown(`

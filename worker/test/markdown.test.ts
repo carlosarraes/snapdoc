@@ -60,6 +60,69 @@ describe("renderMarkdown", () => {
     expect(html.match(/\/review\/mermaid-11\.15\.0\.min\.js/g)).toHaveLength(1);
   });
 
+  it("wraps schema references in later code blocks and inline code", async () => {
+    const md = [
+      "```python",
+      "class QuoteResult(BaseModel):",
+      "    id: UUID",
+      "```",
+      "",
+      "```python",
+      "async def get(self) -> QuoteResult: ...",
+      "```",
+      "",
+      "The `QuoteResult` payload is returned as-is.",
+    ].join("\n");
+    const { html } = await renderMarkdown(md);
+
+    const span = '<span class="sd-ref" data-sd-ref="QuoteResult" tabindex="0" role="button">QuoteResult</span>';
+    // Definition site + later block + inline code span.
+    expect(html.match(/data-sd-ref="QuoteResult"/g)).toHaveLength(3);
+    expect(html).toContain(`-&gt; ${span}: ...`);
+    expect(html).toContain(`<code>${span}</code>`);
+    // Undefined names stay completely unstyled.
+    expect(html).not.toContain('data-sd-ref="BaseModel"');
+    expect(html).not.toContain('data-sd-ref="UUID"');
+    // Word boundaries hold at render level too.
+    expect(html).not.toContain('data-sd-ref="Quote"');
+    // Payload + bootstrap ship in <head>.
+    expect(html).toContain('<script type="application/json" id="sd-ref-defs">');
+    expect(html).toContain("class QuoteResult(BaseModel)");
+  });
+
+  it("emits no schema-ref markup, payload, or bootstrap without definitions", async () => {
+    const { html } = await renderMarkdown("Just `SomeName` prose.\n\n```go\ntype S struct{}\n```");
+    expect(html).not.toContain("data-sd-ref");
+    expect(html).not.toContain('id="sd-ref-defs"');
+    expect(html).not.toContain("getElementById"); // bootstrap absent
+    expect(html).toContain("<code>SomeName</code>");
+  });
+
+  it("never wraps schema names inside mermaid figures", async () => {
+    const md = [
+      "```python",
+      "class Browser:",
+      "    pass",
+      "```",
+      "",
+      "```mermaid",
+      "flowchart LR",
+      "  Browser-->API",
+      "```",
+    ].join("\n");
+    const { html } = await renderMarkdown(md);
+    const figure = html.slice(html.indexOf('<figure class="sd-mermaid"'), html.indexOf("</figure>"));
+    expect(figure).toContain("Browser");
+    expect(figure).not.toContain("sd-ref");
+  });
+
+  it("keeps escaping intact around wrapped names", async () => {
+    const md = "```ts\ntype Flag = boolean;\n```\n\n```ts\nconst ok: Flag = a < b;\n```";
+    const { html } = await renderMarkdown(md);
+    expect(html).toContain("a &lt; b");
+    expect(html).toContain('data-sd-ref="Flag"');
+  });
+
   it("keeps ordinary fenced code behavior unchanged", async () => {
     const { html } = await renderMarkdown("```js\nconst diagram = 'mermaid';\n```");
 

@@ -91,7 +91,7 @@ export function flatten(root: Node): FlatText {
   let text = "";
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const node = n as Text;
-    if (node.parentElement?.closest(".sd-mermaid-source, .sd-mermaid-error")) continue;
+    if (node.parentElement?.closest(".sd-mermaid-source, .sd-mermaid-error, .sd-ref-tooltip")) continue;
     nodes.push({ start: text.length, node });
     text += node.nodeValue ?? "";
   }

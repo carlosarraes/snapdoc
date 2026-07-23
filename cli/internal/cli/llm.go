@@ -24,6 +24,12 @@ PUBLISH
   Add --json to any command for machine-readable output.
   Fenced Mermaid blocks in Markdown render natively with a readable source
   fallback; add accTitle and accDescr directives for accessible diagrams.
+  Schema tooltips: types defined in fenced python/ts code blocks (Python
+  class; TS interface/class/enum/type) turn every exact-name mention in
+  other code blocks and inline code into a hoverable reference showing the
+  definition. Define schemas once in one fenced block, then reference them
+  by exact name; names not defined in the document stay plain, so readers
+  can tell at a glance what the document defines versus imports.
 
 PUBLISH WITH IMAGES
   Reference images with normal relative paths:

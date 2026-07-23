@@ -1,4 +1,5 @@
 import { Marked } from "marked";
+import { extractDefinitions, serializeDefs, wrapCode } from "./schema-refs";
 
 // Replaceable renderer: trusted markdown text -> self-contained styled HTML document.
 
@@ -73,6 +74,91 @@ const MERMAID_BOOTSTRAP = `<script>
 })();
 </script>`;
 
+// One shared tooltip driven by delegated events: hover/focus shows the
+// definition, click (or Enter/Space) pins it so it can be scrolled and
+// copied from, Esc or clicking away dismisses. Content is set via
+// textContent only — the JSON payload never becomes markup.
+const SCHEMA_REF_BOOTSTRAP = `<script>
+(() => {
+  const setup = () => {
+    const holder = document.getElementById("sd-ref-defs");
+    if (!holder || !document.querySelector(".sd-ref")) return;
+    let defs;
+    try { defs = JSON.parse(holder.textContent); } catch { return; }
+    let tip = null, pinned = null;
+    const ensure = () => {
+      if (tip) return tip;
+      tip = document.createElement("div");
+      tip.className = "sd-ref-tooltip";
+      tip.id = "sd-ref-tooltip";
+      tip.setAttribute("role", "tooltip");
+      const pre = document.createElement("pre");
+      pre.appendChild(document.createElement("code"));
+      tip.appendChild(pre);
+      tip.hidden = true;
+      document.body.appendChild(tip);
+      return tip;
+    };
+    const show = (ref) => {
+      const def = defs[ref.dataset.sdRef];
+      if (!def) return;
+      const t = ensure();
+      t.querySelector("code").textContent = def.code;
+      t.hidden = false;
+      t.style.left = "0px";
+      t.style.top = "0px";
+      const rect = ref.getBoundingClientRect();
+      const margin = 8;
+      const maxLeft = scrollX + document.documentElement.clientWidth - t.offsetWidth - margin;
+      t.style.left = Math.max(scrollX + margin, Math.min(rect.left + scrollX, maxLeft)) + "px";
+      const below = rect.bottom + scrollY + 6;
+      const fitsBelow = rect.bottom + t.offsetHeight + 12 <= innerHeight;
+      const fitsAbove = rect.top - t.offsetHeight - 12 >= 0;
+      t.style.top = (!fitsBelow && fitsAbove ? rect.top + scrollY - t.offsetHeight - 6 : below) + "px";
+      ref.setAttribute("aria-describedby", "sd-ref-tooltip");
+    };
+    const hide = () => {
+      if (pinned || !tip) return;
+      tip.hidden = true;
+      document.querySelectorAll('[aria-describedby="sd-ref-tooltip"]').forEach((el) => el.removeAttribute("aria-describedby"));
+    };
+    const unpin = () => {
+      if (pinned) { delete pinned.dataset.sdPinned; pinned = null; }
+      hide();
+    };
+    document.addEventListener("mouseover", (e) => { const r = e.target.closest?.(".sd-ref"); if (r && !pinned) show(r); });
+    document.addEventListener("mouseout", (e) => { if (e.target.closest?.(".sd-ref")) hide(); });
+    document.addEventListener("focusin", (e) => { const r = e.target.closest?.(".sd-ref"); if (r && !pinned) show(r); });
+    document.addEventListener("focusout", (e) => { if (e.target.closest?.(".sd-ref")) hide(); });
+    document.addEventListener("click", (e) => {
+      const r = e.target.closest?.(".sd-ref");
+      if (r) {
+        if (pinned === r) { unpin(); return; }
+        if (pinned) delete pinned.dataset.sdPinned;
+        pinned = r;
+        r.dataset.sdPinned = "1";
+        show(r);
+      } else if (!e.target.closest?.(".sd-ref-tooltip")) {
+        unpin();
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { unpin(); return; }
+      const r = e.target.closest?.(".sd-ref");
+      if (r && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        r.click();
+      }
+    });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setup, { once: true });
+  } else {
+    setup();
+  }
+})();
+</script>`;
+
 const THEME_CSS = `
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -103,6 +189,10 @@ hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
 .sd-mermaid-source summary { cursor: pointer; color: #59636e; font-size: 0.9rem; }
 .sd-mermaid-source pre { margin: 0.5rem 0 0; }
 .sd-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.sd-ref { border-bottom: 1px dashed #0969da; cursor: help; }
+.sd-ref:hover, .sd-ref:focus-visible, .sd-ref[data-sd-pinned] { background: rgba(9, 105, 218, 0.1); border-radius: 3px; }
+.sd-ref-tooltip { position: absolute; z-index: 10; max-width: min(38rem, calc(100vw - 2rem)); max-height: 20rem; overflow: auto; background: #ffffff; border: 1px solid #d1d9e0; border-radius: 8px; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2); padding: 0.75rem 1rem; }
+.sd-ref-tooltip pre { margin: 0; padding: 0; background: none; }
 .toc { background: #f6f8fa; border: 1px solid #d1d9e0; border-radius: 8px; padding: 0.75rem 1rem; margin: 0 0 1.75rem; }
 .toc-title { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #59636e; margin-bottom: 0.4rem; }
 .toc ul { list-style: none; margin: 0; padding: 0; }
@@ -120,6 +210,9 @@ hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
   hr { border-color: #30363d; }
   .sd-mermaid-output { border-color: #30363d; }
   .sd-mermaid-source summary { color: #9198a1; }
+  .sd-ref { border-color: #4493f8; }
+  .sd-ref:hover, .sd-ref:focus-visible, .sd-ref[data-sd-pinned] { background: rgba(68, 147, 248, 0.15); }
+  .sd-ref-tooltip { background: #161b22; border-color: #30363d; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); }
   .toc { background: #161b22; border-color: #30363d; }
   .toc-title { color: #9198a1; }
 }
@@ -211,6 +304,10 @@ export async function renderMarkdown(
   const seen = new Map<string, number>();
   let mermaidCount = 0;
   const md = new Marked({ async: true, gfm: true });
+  // Scan pass: collect Python/TS type definitions from fenced blocks so the
+  // render pass can wrap every exact-name mention as a hoverable reference.
+  const schemaDefs = extractDefinitions(md.lexer(src));
+  const schemaNames = [...schemaDefs.keys()];
   md.use({
     renderer: {
       heading(token) {
@@ -222,7 +319,15 @@ export async function renderMarkdown(
         return `<h${token.depth} id="${slug}">${inner}</h${token.depth}>\n`;
       },
       code(token) {
-        if ((token.lang ?? "").trim().toLowerCase() !== "mermaid") return false;
+        if ((token.lang ?? "").trim().toLowerCase() !== "mermaid") {
+          if (schemaNames.length === 0 || token.escaped) return false;
+          // Mirrors marked's default fenced-code output exactly, with schema
+          // references wrapped; matching runs on the raw text before escaping.
+          const langString = (token.lang ?? "").match(/^\S*/)?.[0] ?? "";
+          const body = wrapCode(token.text.replace(/\n$/, "") + "\n", schemaNames, escapeHtml);
+          if (!langString) return `<pre><code>${body}</code></pre>\n`;
+          return `<pre><code class="language-${escapeHtml(langString)}">${body}</code></pre>\n`;
+        }
         mermaidCount++;
         const id = `snapdoc-mermaid-${mermaidCount}`;
         const captionId = `${id}-caption`;
@@ -235,6 +340,10 @@ export async function renderMarkdown(
 <pre><code class="language-mermaid">${escapeHtml(token.text)}\n</code></pre>
 </details>
 </figure>\n`;
+      },
+      codespan(token) {
+        if (schemaNames.length === 0) return false;
+        return `<code>${wrapCode(token.text, schemaNames, escapeHtml)}</code>`;
       },
     },
   });
@@ -253,6 +362,7 @@ export async function renderMarkdown(
 ${mermaidCount > 0 ? `${MERMAID_DOCUMENT_MARKER}\n` : ""}<title>${safeTitle}</title>
 <style>${THEME_CSS}</style>
 ${mermaidCount > 0 ? `<script src="${MERMAID_RUNTIME_PATH}" integrity="${MERMAID_RUNTIME_INTEGRITY}" crossorigin="anonymous" defer></script>\n${MERMAID_BOOTSTRAP}` : ""}
+${schemaDefs.size > 0 ? `<script type="application/json" id="sd-ref-defs">${serializeDefs(schemaDefs)}</script>\n${SCHEMA_REF_BOOTSTRAP}` : ""}
 </head>
 <body>
 ${tocHtml}${rendered}</body>
