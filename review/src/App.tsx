@@ -70,7 +70,9 @@ export default function App() {
   }, []);
 
   const renderAnchors = useCallback(() => {
-    const anchors = roots.filter((c) => c.anchor).map((c) => ({ id: c.id, ...(c.anchor as Anchor) }));
+    // Resolved threads drop out of the document highlights; their cards move
+    // to the collapsed Resolved section in the rail instead.
+    const anchors = roots.filter((c) => c.anchor && !c.resolved).map((c) => ({ id: c.id, ...(c.anchor as Anchor) }));
     sendToFrame({ type: "render", anchors });
   }, [roots, sendToFrame]);
 
@@ -189,11 +191,20 @@ export default function App() {
     setComments((cs) => cs.filter((c) => c.id !== id && c.parent_id !== id));
   }, []);
 
+  const setResolved = useCallback(
+    async (id: string, resolved: boolean) => {
+      const updated = await api.resolve(id, resolved, identity.name || "reader");
+      setComments((cs) => cs.map((c) => (c.id === updated.id ? updated : c)));
+    },
+    [identity.name],
+  );
+
   if (loadError) return <div className="rail-message error">{loadError}</div>;
   if (!meta || version === null) return <div className="rail-message">Loading…</div>;
 
-  const orphanRoots = roots.filter((c) => orphans.has(c.id));
-  const placedRoots = roots.filter((c) => !orphans.has(c.id));
+  const resolvedRoots = roots.filter((c) => c.resolved);
+  const orphanRoots = roots.filter((c) => !c.resolved && orphans.has(c.id));
+  const placedRoots = roots.filter((c) => !c.resolved && !orphans.has(c.id));
   const hasName = !!identity.name;
 
   const threadProps = (c: ReaderComment, clickable: boolean) => ({
@@ -210,6 +221,7 @@ export default function App() {
     onSubmitReply: submitReply,
     onNeedName: () => setEditingIdentity(true),
     onDelete: remove,
+    onResolve: setResolved,
     registerRef: (el: HTMLDivElement | null) => {
       if (el) cardRefs.current.set(c.id, el);
     },
@@ -286,6 +298,15 @@ export default function App() {
               <p className="hint">The text these comments referred to has changed in this version.</p>
               {orphanRoots.map((c) => (
                 <Thread key={c.id} {...threadProps(c, false)} orphaned />
+              ))}
+            </section>
+          )}
+
+          {resolvedRoots.length > 0 && (
+            <section className="resolved">
+              <h2>Resolved ({resolvedRoots.length})</h2>
+              {resolvedRoots.map((c) => (
+                <Thread key={c.id} {...threadProps(c, false)} resolved />
               ))}
             </section>
           )}
@@ -410,22 +431,35 @@ function Thread(props: {
   replying: boolean;
   hasName: boolean;
   orphaned?: boolean;
+  resolved?: boolean;
   onFocus?: () => void;
   onReply: () => void;
   onCancelReply: () => void;
   onSubmitReply: (parentId: string, body: string) => Promise<void>;
   onNeedName: () => void;
   onDelete: (id: string) => Promise<void>;
+  onResolve: (id: string, resolved: boolean) => Promise<void>;
   registerRef: (el: HTMLDivElement | null) => void;
   canDeleteReply: (id: string) => boolean;
 }) {
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const toggleResolved = async () => {
+    setResolveBusy(true);
+    try {
+      await props.onResolve(props.root.id, !props.resolved);
+    } finally {
+      setResolveBusy(false);
+    }
+  };
+
   return (
-    <div ref={props.registerRef} className={`thread${props.focused ? " focused" : ""}`}>
+    <div ref={props.registerRef} className={`thread${props.focused ? " focused" : ""}${props.resolved ? " thread-resolved" : ""}`}>
       <CommentCard comment={props.root} canDelete={props.canDelete} onDelete={props.onDelete} onCardClick={props.onFocus} />
       {props.replies.map((r) => (
         <CommentCard key={r.id} comment={r} reply canDelete={props.canDeleteReply(r.id)} onDelete={props.onDelete} />
       ))}
       {props.enabled &&
+        !props.resolved &&
         (props.replying ? (
           <ReplyBox
             parentId={props.root.id}
@@ -435,10 +469,20 @@ function Thread(props: {
             onNeedName={props.onNeedName}
           />
         ) : (
-          <button className="link" onClick={props.onReply}>
-            Reply
-          </button>
+          <div className="thread-actions">
+            <button className="link" onClick={props.onReply}>
+              Reply
+            </button>
+            <button className="link" onClick={toggleResolved} disabled={resolveBusy}>
+              {resolveBusy ? "Resolving…" : "Resolve"}
+            </button>
+          </div>
         ))}
+      {props.enabled && props.resolved && (
+        <button className="link" onClick={toggleResolved} disabled={resolveBusy}>
+          {resolveBusy ? "Reopening…" : "Reopen"}
+        </button>
+      )}
     </div>
   );
 }

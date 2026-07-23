@@ -82,6 +82,10 @@ export const api = {
   post: (id: string, input: PostCommentInput) =>
     req<ReaderComment>("POST", `/v1/reader/artifacts/${id}/comments`, input),
   remove: (cid: string) => req<{ id: string; deleted_at: string }>("DELETE", `/v1/reader/comments/${cid}`),
+  // Resolves (or reopens) a thread; the server re-roots a reply id and
+  // returns the updated root comment.
+  resolve: (cid: string, resolved: boolean, authorName: string) =>
+    req<ReaderComment>("PATCH", `/v1/reader/comments/${cid}`, { resolved, author_name: authorName }),
 };
 
 export function relativeTime(iso: string): string {

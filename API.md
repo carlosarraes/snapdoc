@@ -500,6 +500,13 @@ and per-artifact.
   (HttpOnly, Secure, SameSite=Lax) — the self-delete capability. Errors:
   `comments_disabled` (403) when not opted in, `rate_limited` (429) with
   `Retry-After`, `gone` (410), `not_found` (404), `invalid_request` (400).
+- `PATCH /v1/reader/comments/{cid}` — resolve or reopen a thread from the review
+  page. Body `{ "resolved": true|false, "author_name": "..." }` (name 1–80, used
+  for attribution — recorded as `"<name> (reader)"` in `resolved_by` so it can
+  never be mistaken for a verified Access email). A reply id re-roots to its
+  thread root; returns the updated root comment. Gated and rate-limited exactly
+  like posting: `comments_disabled` (403), `rate_limited` (429), `gone` (410),
+  `not_found` (404), `invalid_request` (400).
 - `DELETE /v1/reader/comments/{cid}` — self-delete, gated by the `sd_reviewer`
   cookie (only the author's own comment; cascades to replies). A missing/mismatched
   cookie reads as 404 `not_found`.

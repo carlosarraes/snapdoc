@@ -207,6 +207,56 @@ export function createReaderApp(): Hono<ReaderCtx> {
     return c.json(commentJson(comment, { public: true }), 201);
   });
 
+  // Thread resolution from the review page. Anyone who can comment can mark a
+  // thread resolved or reopen it; the id re-roots to the thread root. The
+  // attribution records the typed reader name tagged "(reader)" so it can
+  // never be mistaken for a verified Access email in resolved_by.
+  app.patch("/comments/:cid", async (c) => {
+    const store = c.get("store");
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      return errorResponse("invalid_request", 'Body must be JSON: { "resolved": true|false, "author_name": "..." }.');
+    }
+    if (typeof payload.resolved !== "boolean") {
+      return errorResponse("invalid_request", "resolved must be a boolean.");
+    }
+    const authorName = typeof payload.author_name === "string" ? payload.author_name.trim() : "";
+    if (authorName.length < 1 || authorName.length > MAX_AUTHOR_NAME) {
+      return errorResponse("invalid_request", `author_name must be 1–${MAX_AUTHOR_NAME} characters.`);
+    }
+
+    const comment = await store.getLiveComment(c.req.param("cid"));
+    if (!comment) return errorResponse("not_found", "Comment not found.");
+    const gate = await store.getArtifactGate(comment.artifactId);
+    if (!gate) return errorResponse("not_found", "Comment not found.");
+    if (gate.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
+    if (!gate.commentsEnabled) return errorResponse("comments_disabled", "Commenting is not enabled for this artifact.");
+
+    const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const ipHash = await hashIp(ip, c.env.COMMENT_IP_SALT ?? "");
+    const rate = await store.checkCommentRateLimit(
+      ipHash,
+      comment.artifactId,
+      Number(c.env.COMMENT_RATE_LIMIT_PER_IP_PER_HOUR),
+      Number(c.env.COMMENT_RATE_LIMIT_PER_ARTIFACT_PER_HOUR),
+    );
+    if (!rate.allowed) {
+      return errorResponse(
+        "rate_limited",
+        `Comment rate limit exceeded (${rate.scope}); retry after ${rate.retryAfterSeconds}s.`,
+        { "Retry-After": String(rate.retryAfterSeconds) },
+      );
+    }
+
+    const updated = await store.setCommentResolved(comment.id, payload.resolved, `${authorName} (reader)`);
+    if (!updated) return errorResponse("not_found", "Comment not found.");
+    await store.recordCommentEvent(ipHash, comment.artifactId);
+    return c.json(commentJson(updated, { public: true }));
+  });
+
   // Session self-delete: the viewer cookie is the only capability. A missing
   // cookie or a mismatch reads as "not found", never revealing the comment.
   app.delete("/comments/:cid", async (c) => {

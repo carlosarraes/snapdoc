@@ -322,3 +322,65 @@ describe("reader comments — passcode mutual exclusion", () => {
     await expectError(await enableComments(protectedId, tok.token), 400, "invalid_request");
   });
 });
+
+describe("reader resolve", () => {
+  async function resolveReader(cid: string, body: unknown, ip = "9.9.9.9") {
+    return SELF.fetch(`${API_BASE}/v1/reader/comments/${cid}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("resolves and reopens a thread from the review page", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const root = (await (
+      await postReader(id, { author_name: "Ana", body: "typo here", anchor: ANCHOR })
+    ).json()) as ReaderComment;
+
+    const res = await resolveReader(root.id, { resolved: true, author_name: "Carlos" });
+    expect(res.status).toBe(200);
+    const resolved = (await res.json()) as ReaderComment & { resolved_by: string | null };
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.resolved_by).toBe("Carlos (reader)");
+
+    const open = (await (await readReader(id, "open")).json()) as { comments: ReaderComment[] };
+    expect(open.comments).toHaveLength(0);
+    const done = (await (await readReader(id, "resolved")).json()) as { comments: ReaderComment[] };
+    expect(done.comments.map((c) => c.id)).toContain(root.id);
+
+    const reopened = await resolveReader(root.id, { resolved: false, author_name: "Carlos" });
+    expect(((await reopened.json()) as ReaderComment).resolved).toBe(false);
+  });
+
+  it("re-roots a reply id to its thread root", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const root = (await (
+      await postReader(id, { author_name: "Ana", body: "root", anchor: ANCHOR })
+    ).json()) as ReaderComment;
+    const reply = (await (
+      await postReader(id, { author_name: "Bo", body: "reply", parent_id: root.id })
+    ).json()) as ReaderComment;
+
+    const res = await resolveReader(reply.id, { resolved: true, author_name: "Bo" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as ReaderComment).id).toBe(root.id);
+  });
+
+  it("gates writes on comments_enabled and validates the body", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    const root = (await (
+      await postReader(id, { author_name: "Ana", body: "x", anchor: ANCHOR })
+    ).json()) as ReaderComment;
+
+    await expectError(await resolveReader(root.id, { resolved: "yes", author_name: "A" }), 400, "invalid_request");
+    await expectError(await resolveReader(root.id, { resolved: true }), 400, "invalid_request");
+    await expectError(await resolveReader("cmt_missing00000", { resolved: true, author_name: "A" }), 404, "not_found");
+
+    await enableComments(id, tok.token, false);
+    await expectError(await resolveReader(root.id, { resolved: true, author_name: "A" }), 403, "comments_disabled");
+  });
+});

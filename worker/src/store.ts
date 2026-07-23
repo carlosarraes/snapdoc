@@ -1300,6 +1300,16 @@ export class Store {
     return row ? rowToArtifact(row) : null;
   }
 
+  // Public lookup used to gate reader mutations on the owning artifact
+  // before anything is written; live comments only.
+  async getLiveComment(commentId: string): Promise<Comment | null> {
+    const row = await this.db
+      .prepare(`SELECT ${COMMENT_COLUMNS} FROM comments WHERE id = ?1 AND deleted_at IS NULL`)
+      .bind(commentId)
+      .first<CommentRow>();
+    return row ? rowToComment(row) : null;
+  }
+
   private async fetchComment(id: string): Promise<Comment | null> {
     const row = await this.db
       .prepare(`SELECT ${COMMENT_COLUMNS} FROM comments WHERE id = ?1`)
