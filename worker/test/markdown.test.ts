@@ -76,8 +76,10 @@ describe("renderMarkdown", () => {
     const { html } = await renderMarkdown(md);
 
     const span = '<span class="sd-ref" data-sd-ref="QuoteResult" tabindex="0" role="button">QuoteResult</span>';
-    // Definition site + later block + inline code span.
-    expect(html.match(/data-sd-ref="QuoteResult"/g)).toHaveLength(3);
+    // Later block + inline code span; the definition site itself stays plain
+    // (hovering a declaration would just show the code already on screen).
+    expect(html.match(/data-sd-ref="QuoteResult"/g)).toHaveLength(2);
+    expect(html).toContain("class QuoteResult(BaseModel):");
     expect(html).toContain(`-&gt; ${span}: ...`);
     expect(html).toContain(`<code>${span}</code>`);
     // Undefined names stay completely unstyled.
@@ -88,6 +90,26 @@ describe("renderMarkdown", () => {
     // Payload + bootstrap ship in <head>.
     expect(html).toContain('<script type="application/json" id="sd-ref-defs">');
     expect(html).toContain("class QuoteResult(BaseModel)");
+  });
+
+  it("keeps foreign schema names hoverable inside another definition", async () => {
+    const md = [
+      "```python",
+      "class QuoteSummary(BaseModel):",
+      "    id: UUID",
+      "```",
+      "",
+      "```python",
+      "class QuoteResult(QuoteSummary):",
+      "    line_items: list",
+      "```",
+    ].join("\n");
+    const { html } = await renderMarkdown(md);
+    // The base-class mention references another schema — still hoverable.
+    expect(html).toContain('data-sd-ref="QuoteSummary"');
+    // Neither class is a ref at its own declaration.
+    expect(html).not.toContain('data-sd-ref="QuoteResult"');
+    expect(html.match(/data-sd-ref="QuoteSummary"/g)).toHaveLength(1);
   });
 
   it("emits no schema-ref markup, payload, or bootstrap without definitions", async () => {

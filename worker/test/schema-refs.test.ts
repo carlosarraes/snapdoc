@@ -3,9 +3,13 @@ import { Marked } from "marked";
 import { extractDefinitions, serializeDefs, wrapCode } from "../src/schema-refs";
 import { escapeHtml } from "../src/markdown";
 
-function defs(markdown: string) {
+function extract(markdown: string) {
   const md = new Marked({ gfm: true });
   return extractDefinitions(md.lexer(markdown));
+}
+
+function defs(markdown: string) {
+  return extract(markdown).defs;
 }
 
 function fence(lang: string, code: string): string {
@@ -162,6 +166,27 @@ describe("wrapCode", () => {
 
   it("returns plain escaped text when no names are given", () => {
     expect(wrapCode("a < b", [], escapeHtml)).toBe("a &lt; b");
+  });
+});
+
+describe("definition sites", () => {
+  it("records each definition's character range keyed by block text", () => {
+    const block = "class A:\n    x: int\n\nclass B(A):\n    y: int";
+    const { sites } = extract(fence("python", block));
+    const ranges = sites.get(block)!;
+    expect(ranges).toHaveLength(2);
+    expect(block.slice(ranges[0].start, ranges[0].end)).toBe("class A:\n    x: int");
+    expect(ranges[1].name).toBe("B");
+  });
+
+  it("wrapCode skips a name inside its own definition but wraps other names there", () => {
+    const blockA = "class A:\n    x: int";
+    const blockB = "class B(A):\n    y: int\n    peer: B";
+    const { sites } = extract(`${fence("python", blockA)}\n\n${fence("python", blockB)}`);
+    // Rendering the block that defines B: A is foreign there, B is itself.
+    const out = wrapCode(blockB, ["A", "B"], escapeHtml, sites.get(blockB));
+    expect(out).toContain('data-sd-ref="A"');
+    expect(out).not.toContain('data-sd-ref="B"');
   });
 });
 

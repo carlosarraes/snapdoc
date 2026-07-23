@@ -9,6 +9,15 @@ export interface SchemaDef {
   code: string;
 }
 
+// Character range of one definition inside its fenced block's raw text, so
+// the renderer can leave a name plain within its own definition (hovering a
+// declaration would only show the code already on screen).
+export interface DefinitionSite {
+  name: string;
+  start: number;
+  end: number;
+}
+
 const PYTHON_LANGS = new Set(["python", "py"]);
 const TYPESCRIPT_LANGS = new Set(["typescript", "ts", "tsx", "javascript", "js", "jsx"]);
 
@@ -28,8 +37,14 @@ function indentOf(line: string): number {
 
 const PYTHON_CLASS = /^([ \t]*)class[ \t]+([A-Za-z_][A-Za-z0-9_]*)/;
 
-function scanPython(text: string, add: (name: string, code: string) => void): void {
+function scanPython(text: string, add: (name: string, start: number, end: number) => void): void {
   const lines = text.split("\n");
+  const lineStart: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStart.push(offset);
+    offset += line.length + 1;
+  }
   for (let i = 0; i < lines.length; i++) {
     const match = PYTHON_CLASS.exec(lines[i]);
     if (!match) continue;
@@ -46,7 +61,7 @@ function scanPython(text: string, add: (name: string, code: string) => void): vo
       if (indentOf(lines[j]) <= indent) break;
       end = j;
     }
-    add(match[2], lines.slice(start, end + 1).join("\n"));
+    add(match[2], lineStart[start], lineStart[end] + lines[end].length);
   }
 }
 
@@ -119,45 +134,62 @@ function aliasEnd(text: string, from: number): number {
   return text.length;
 }
 
-function scanTypescript(text: string, add: (name: string, code: string) => void): void {
+function scanTypescript(text: string, add: (name: string, start: number, end: number) => void): void {
   const lines = text.split("\n");
   let offset = 0;
   for (const line of lines) {
     const match = TS_DEFINITION.exec(line);
     if (match) {
       const end = match[1] === "type" ? aliasEnd(text, offset + match[0].length) : braceEnd(text, offset + match[0].length);
-      add(match[2], text.slice(offset, end).trimEnd());
+      add(match[2], offset, offset + text.slice(offset, end).trimEnd().length);
     }
     offset += line.length + 1;
   }
 }
 
+export interface ExtractedDefinitions {
+  defs: Map<string, SchemaDef>;
+  // Definition ranges keyed by the raw text of the block that holds them, so
+  // the renderer can match them back to code tokens during the render pass.
+  sites: Map<string, DefinitionSite[]>;
+}
+
 // Walks lexed markdown tokens and returns name -> definition for every
 // Python/TypeScript type defined in a fenced code block. First wins.
-export function extractDefinitions(tokens: Token[]): Map<string, SchemaDef> {
-  const found = new Map<string, SchemaDef>();
+export function extractDefinitions(tokens: Token[]): ExtractedDefinitions {
+  const defs = new Map<string, SchemaDef>();
+  const sites = new Map<string, DefinitionSite[]>();
   for (const token of tokens) {
     if (token.type !== "code") continue;
     const lang = (token.lang ?? "").trim().toLowerCase().split(/\s+/)[0];
     const scanner = PYTHON_LANGS.has(lang) ? scanPython : TYPESCRIPT_LANGS.has(lang) ? scanTypescript : null;
     if (!scanner) continue;
-    scanner(token.text, (name, code) => {
-      if (!found.has(name)) {
-        found.set(name, {
+    scanner(token.text, (name, start, end) => {
+      const blockSites = sites.get(token.text) ?? [];
+      blockSites.push({ name, start, end });
+      sites.set(token.text, blockSites);
+      if (!defs.has(name)) {
+        defs.set(name, {
           name,
           lang: PYTHON_LANGS.has(lang) ? "python" : "typescript",
-          code: truncateSnippet(code),
+          code: truncateSnippet(token.text.slice(start, end)),
         });
       }
     });
   }
-  return found;
+  return { defs, sites };
 }
 
 // Escapes raw code text while wrapping every exact-name occurrence in a
 // reference span. Matching happens on the raw (unescaped) source, so entity
-// text like `&quot;` can never produce a false match.
-export function wrapCode(rawText: string, names: string[], escape: (s: string) => string): string {
+// text like `&quot;` can never produce a false match. Occurrences of a name
+// that fall inside its own definition range (`skip`) stay plain.
+export function wrapCode(
+  rawText: string,
+  names: string[],
+  escape: (s: string) => string,
+  skip?: DefinitionSite[],
+): string {
   if (names.length === 0) return escape(rawText);
   const alternatives = [...names]
     .sort((a, b) => b.length - a.length)
@@ -168,6 +200,8 @@ export function wrapCode(rawText: string, names: string[], escape: (s: string) =
   let out = "";
   let last = 0;
   for (const match of rawText.matchAll(matcher)) {
+    const selfDefined = skip?.some((s) => s.name === match[0] && match.index >= s.start && match.index < s.end);
+    if (selfDefined) continue;
     out += escape(rawText.slice(last, match.index));
     const name = escape(match[0]);
     out += `<span class="sd-ref" data-sd-ref="${name}" tabindex="0" role="button">${name}</span>`;

@@ -57,8 +57,9 @@ async function openFixture(page: Page): Promise<void> {
 test("wraps defined names everywhere and leaves undefined names plain", async ({ page }) => {
   await openFixture(page);
 
-  await expect(page.locator('.sd-ref[data-sd-ref="QuoteResult"]')).toHaveCount(3);
-  await expect(page.locator('.sd-ref[data-sd-ref="QuoteSummary"]')).toHaveCount(2);
+  // Declarations stay plain: only the later usage + inline mention count.
+  await expect(page.locator('.sd-ref[data-sd-ref="QuoteResult"]')).toHaveCount(2);
+  await expect(page.locator('.sd-ref[data-sd-ref="QuoteSummary"]')).toHaveCount(1);
   await expect(page.locator('.sd-ref[data-sd-ref="Money"]')).toHaveCount(0);
   await expect(page.locator('.sd-ref[data-sd-ref="BaseModel"]')).toHaveCount(0);
 });

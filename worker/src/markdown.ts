@@ -306,7 +306,7 @@ export async function renderMarkdown(
   const md = new Marked({ async: true, gfm: true });
   // Scan pass: collect Python/TS type definitions from fenced blocks so the
   // render pass can wrap every exact-name mention as a hoverable reference.
-  const schemaDefs = extractDefinitions(md.lexer(src));
+  const { defs: schemaDefs, sites: schemaSites } = extractDefinitions(md.lexer(src));
   const schemaNames = [...schemaDefs.keys()];
   md.use({
     renderer: {
@@ -324,7 +324,7 @@ export async function renderMarkdown(
           // Mirrors marked's default fenced-code output exactly, with schema
           // references wrapped; matching runs on the raw text before escaping.
           const langString = (token.lang ?? "").match(/^\S*/)?.[0] ?? "";
-          const body = wrapCode(token.text.replace(/\n$/, "") + "\n", schemaNames, escapeHtml);
+          const body = wrapCode(token.text.replace(/\n$/, "") + "\n", schemaNames, escapeHtml, schemaSites.get(token.text));
           if (!langString) return `<pre><code>${body}</code></pre>\n`;
           return `<pre><code class="language-${escapeHtml(langString)}">${body}</code></pre>\n`;
         }
