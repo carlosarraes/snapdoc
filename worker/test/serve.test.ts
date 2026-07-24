@@ -198,6 +198,96 @@ describe("annotate mode", () => {
   });
 });
 
+describe("protected artifacts in review mode", () => {
+  const PW = "letmein";
+
+  async function protectedDoc(body: string): Promise<{ id: string; vt: string }> {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, comments: true, passcode: PW, body })
+    ).json()) as { id: string };
+    const unlock = await SELF.fetch(`${ARTIFACT_BASE}/${id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: PW }),
+      redirect: "manual",
+    });
+    const vt = (unlock.headers.get("Set-Cookie") ?? "").split(";")[0].split("=")[1];
+    return { id, vt };
+  }
+
+  it("accepts a valid ?vt= token on the annotate path and rejects bad ones", async () => {
+    const { id, vt } = await protectedDoc("<p>guarded</p>");
+
+    const good = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1&vt=${vt}`);
+    expect(good.status).toBe(200);
+    const html = await good.text();
+    expect(html).toContain("guarded");
+    expect(html).toContain("/review/annotator.js");
+    expect(good.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const bad = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1&vt=deadbeef`);
+    expect(await bad.text()).toContain(`action="/${id}/unlock"`);
+
+    const absent = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1`);
+    expect(await absent.text()).toContain(`action="/${id}/unlock"`);
+  });
+
+  it("rewrites hosted-image srcs with the viewer token in annotate mode", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, comments: true, passcode: PW })
+    ).json()) as { id: string };
+    const hash = "a".repeat(64);
+    await publish({
+      token: tok.token,
+      id,
+      body: `<p>doc</p><img src="${ARTIFACT_BASE}/${id}/a/${hash}"><img src="https://elsewhere.example/pic.png">`,
+    });
+    const unlock = await SELF.fetch(`${ARTIFACT_BASE}/${id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: PW }),
+      redirect: "manual",
+    });
+    const vt = (unlock.headers.get("Set-Cookie") ?? "").split(";")[0].split("=")[1];
+
+    const res = await SELF.fetch(`${ARTIFACT_BASE}/${id}?annotate=1&vt=${vt}`);
+    const html = await res.text();
+    // Same-artifact hosted images carry the token; foreign URLs stay untouched.
+    expect(html).toContain(`/a/${hash}?vt=${vt}`);
+    expect(html).toContain('https://elsewhere.example/pic.png"');
+    expect(html).not.toContain("pic.png?vt=");
+  });
+
+  it("authorizes hosted-asset requests via ?vt=", async () => {
+    const { id, vt } = await protectedDoc("<p>x</p>");
+    const hash = "b".repeat(64);
+    // Auth passes with a valid token (404: no such asset), fails without.
+    expect((await SELF.fetch(`${ARTIFACT_BASE}/${id}/a/${hash}?vt=${vt}`)).status).toBe(404);
+    expect((await SELF.fetch(`${ARTIFACT_BASE}/${id}/a/${hash}?vt=deadbeef`)).status).toBe(401);
+    expect((await SELF.fetch(`${ARTIFACT_BASE}/${id}/a/${hash}`)).status).toBe(401);
+  });
+
+  it("locks the artifact-host review page until unlocked, then injects the token", async () => {
+    const { id, vt } = await protectedDoc("<p>x</p>");
+
+    const locked = await SELF.fetch(`${ARTIFACT_BASE}/review/${id}`);
+    expect(locked.status).toBe(200);
+    const lockedHtml = await locked.text();
+    expect(lockedHtml).toContain(`action="/${id}/unlock"`);
+    expect(lockedHtml).toContain(`name="next" value="/review/${id}"`);
+    expect(lockedHtml).not.toContain("data-viewer-token");
+
+    const open = await SELF.fetch(`${ARTIFACT_BASE}/review/${id}`, {
+      headers: { Cookie: `sd_unlock_${id}=${vt}` },
+    });
+    const openHtml = await open.text();
+    expect(openHtml).toContain(`data-artifact-id="${id}"`);
+    expect(openHtml).toContain(`data-viewer-token="${vt}"`);
+  });
+});
+
 describe("mermaid runtime asset", () => {
   // The review iframe is sandboxed without allow-same-origin, so its runtime
   // fetch is cross-origin from an opaque origin; SRI needs a CORS-readable

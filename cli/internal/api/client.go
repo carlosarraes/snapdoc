@@ -432,8 +432,9 @@ func (c *Client) ListComments(id, status string) (*CommentsResult, error) {
 // ReplyComment posts a reply to a comment thread through the public reader
 // endpoint, attributed to the given display name. The reader channel is
 // deliberate: agents respond in-thread like any reviewer; resolving threads
-// stays a human action on the review page.
-func (c *Client) ReplyComment(artifactID, parentID, authorName, text string) (*Comment, error) {
+// stays a human action on the review page. A non-empty passcode rides in
+// X-Snapdoc-Passcode for protected artifacts (same header as content reads).
+func (c *Client) ReplyComment(artifactID, parentID, authorName, text, passcode string) (*Comment, error) {
 	payload, err := json.Marshal(map[string]string{
 		"author_name": authorName,
 		"body":        text,
@@ -442,8 +443,12 @@ func (c *Client) ReplyComment(artifactID, parentID, authorName, text string) (*C
 	if err != nil {
 		return nil, err
 	}
+	var headers map[string]string
+	if passcode != "" {
+		headers = map[string]string{"X-Snapdoc-Passcode": passcode}
+	}
 	var cm Comment
-	if err := c.do("POST", "/v1/reader/artifacts/"+url.PathEscape(artifactID)+"/comments", nil, bytes.NewReader(payload), "application/json", &cm); err != nil {
+	if err := c.doH("POST", "/v1/reader/artifacts/"+url.PathEscape(artifactID)+"/comments", nil, bytes.NewReader(payload), "application/json", headers, &cm); err != nil {
 		return nil, err
 	}
 	return &cm, nil

@@ -1933,3 +1933,41 @@ func TestCommentsReplyExplicitNameAndStdin(t *testing.T) {
 		}
 	}
 }
+
+func TestCommentsReplyPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := newFakeServer(t, func(r recordedReq, w http.ResponseWriter) {
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":"cmt_reply","author":"Codex","author_kind":"anon","version":1,"body":"b","created_at":"t","parent_id":"cmt_root","resolved":false}`)
+	})
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+
+	if _, _, code := runCLI([]string{"comments", "reply", "x", "cmt_root", "done", "--name", "Codex", "--passcode", "hunter2"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "hunter2" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want hunter2", srv.reqs[0].passcode)
+	}
+
+	t.Setenv("SNAPDOC_PASSCODE", "fromenv")
+	if _, _, code := runCLI([]string{"comments", "reply", "x", "cmt_root", "done", "--name", "Codex"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[1].passcode != "fromenv" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want fromenv", srv.reqs[1].passcode)
+	}
+}
+
+func TestPublishCommentsAndPasscodeTogether(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfig(t, dir, srv.URL, "tok")
+	if _, _, code := runCLI([]string{"publish", "-", "--comments", "--passcode", "s3cret"}, "<p>x</p>"); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "s3cret" || srv.reqs[0].query["comments"] != "1" {
+		t.Errorf("want both passcode header and comments=1, got passcode=%q query=%v", srv.reqs[0].passcode, srv.reqs[0].query)
+	}
+}

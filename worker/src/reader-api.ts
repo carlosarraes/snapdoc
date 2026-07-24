@@ -3,7 +3,7 @@
 // onto the Bearer publisher app) so the no-auth boundary can't be eroded by a
 // future app.use("*"). Every write is gated by the artifact's comments_enabled
 // opt-in and a per-IP + per-artifact rate limit; authors are pseudonymous.
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { mapStoreError, parseCommentStatus } from "./api";
 import { commentJson, errorResponse, MAX_COMMENT_BYTES } from "./http";
@@ -30,9 +30,48 @@ function newViewerId(): string {
   return `rvw_${out}`;
 }
 
-async function hashIp(ip: string, salt: string): Promise<string> {
+export async function hashIp(ip: string, salt: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${ip}${salt}`));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Passcode gate for reader routes on protected artifacts. Order: the unlock
+// cookie (browser flow), then the X-Snapdoc-Passcode header (agents/CLI —
+// same precedent as the token content read). Header verification is
+// rate-limited and failed guesses consume the artifact's comment budget, so
+// the endpoint never becomes an unthrottled PBKDF2 guessing oracle.
+async function passcodeDenial(
+  c: Context<ReaderCtx>,
+  id: string,
+  hasPasscode: boolean,
+): Promise<Response | null> {
+  if (!hasPasscode) return null;
+  const store = c.get("store");
+  const cookie = getCookie(c, `sd_unlock_${id}`);
+  if (cookie && (await store.checkViewerToken(id, cookie))) return null;
+  const passcode = c.req.header("X-Snapdoc-Passcode");
+  if (!passcode) {
+    return errorResponse("passcode_required", "This artifact is passcode-protected; unlock it or supply X-Snapdoc-Passcode.");
+  }
+  const ipHash = await hashIp(c.req.header("CF-Connecting-IP") ?? "unknown", c.env.COMMENT_IP_SALT ?? "");
+  const rate = await store.checkCommentRateLimit(
+    ipHash,
+    id,
+    Number(c.env.COMMENT_RATE_LIMIT_PER_IP_PER_HOUR),
+    Number(c.env.COMMENT_RATE_LIMIT_PER_ARTIFACT_PER_HOUR),
+  );
+  if (!rate.allowed) {
+    return errorResponse(
+      "rate_limited",
+      `Passcode attempt rate limit exceeded (${rate.scope}); retry after ${rate.retryAfterSeconds}s.`,
+      { "Retry-After": String(rate.retryAfterSeconds) },
+    );
+  }
+  if (!(await store.verifyPasscode(id, passcode))) {
+    await store.recordCommentEvent(ipHash, id);
+    return errorResponse("passcode_incorrect", "The passcode is incorrect.");
+  }
+  return null;
 }
 
 // Validates the W3C-style anchor sent by the annotator. Prefix/suffix default to
@@ -79,6 +118,8 @@ export function createReaderApp(): Hono<ReaderCtx> {
     const found = await c.get("store").getArtifact(c.req.param("id"));
     if (!found) return errorResponse("not_found", "Artifact not found.");
     if (found.artifact.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
+    const denied = await passcodeDenial(c, found.artifact.id, found.artifact.hasPasscode);
+    if (denied) return denied;
     return c.json({
       id: found.artifact.id,
       title: found.artifact.title,
@@ -93,7 +134,10 @@ export function createReaderApp(): Hono<ReaderCtx> {
   app.get("/artifacts/:id/comments", async (c) => {
     const store = c.get("store");
     const id = c.req.param("id");
-    if (!(await store.getArtifactGate(id))) return errorResponse("not_found", "Artifact not found.");
+    const gate = await store.getArtifactGate(id);
+    if (!gate) return errorResponse("not_found", "Artifact not found.");
+    const denied = await passcodeDenial(c, id, gate.hasPasscode);
+    if (denied) return denied;
     const status = parseCommentStatus(c.req.query("status"));
     if (status instanceof Response) return status;
     const { comments, truncated } = await store.listReaderComments(id, status);
@@ -112,6 +156,8 @@ export function createReaderApp(): Hono<ReaderCtx> {
     if (!gate) return errorResponse("not_found", "Artifact not found.");
     if (gate.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
     if (!gate.commentsEnabled) return errorResponse("comments_disabled", "Commenting is not enabled for this artifact.");
+    const denied = await passcodeDenial(c, id, gate.hasPasscode);
+    if (denied) return denied;
 
     const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
     const ipHash = await hashIp(ip, c.env.COMMENT_IP_SALT ?? "");
@@ -234,6 +280,8 @@ export function createReaderApp(): Hono<ReaderCtx> {
     if (!gate) return errorResponse("not_found", "Comment not found.");
     if (gate.status !== "active") return errorResponse("gone", "Artifact is no longer available.");
     if (!gate.commentsEnabled) return errorResponse("comments_disabled", "Commenting is not enabled for this artifact.");
+    const denied = await passcodeDenial(c, comment.artifactId, gate.hasPasscode);
+    if (denied) return denied;
 
     const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
     const ipHash = await hashIp(ip, c.env.COMMENT_IP_SALT ?? "");
@@ -257,12 +305,20 @@ export function createReaderApp(): Hono<ReaderCtx> {
     return c.json(commentJson(updated, { public: true }));
   });
 
-  // Session self-delete: the viewer cookie is the only capability. A missing
-  // cookie or a mismatch reads as "not found", never revealing the comment.
+  // Session self-delete: the viewer cookie is the primary capability. A
+  // missing cookie or a mismatch reads as "not found", never revealing the
+  // comment; on protected artifacts the unlock gate applies on top.
   app.delete("/comments/:cid", async (c) => {
     const viewerId = getCookie(c, VIEWER_COOKIE);
     if (!viewerId) return errorResponse("not_found", "Comment not found.");
-    const result = await c.get("store").deleteReaderComment(c.req.param("cid"), viewerId);
+    const store = c.get("store");
+    const comment = await store.getLiveComment(c.req.param("cid"));
+    if (!comment) return errorResponse("not_found", "Comment not found.");
+    const gate = await store.getArtifactGate(comment.artifactId);
+    if (!gate) return errorResponse("not_found", "Comment not found.");
+    const denied = await passcodeDenial(c, comment.artifactId, gate.hasPasscode);
+    if (denied) return denied;
+    const result = await store.deleteReaderComment(comment.id, viewerId);
     if (!result) return errorResponse("not_found", "Comment not found.");
     return c.json({ id: result.id, deleted_at: result.deletedAt });
   });

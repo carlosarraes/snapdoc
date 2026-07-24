@@ -5,7 +5,8 @@
 // (sandboxed) frame; this page holds the rail + viewer cookie.
 import type { Context } from "hono";
 import { escapeHtml } from "./markdown";
-import { fetchStaticAsset } from "./serve";
+import { fetchStaticAsset, readCookie, unlockPage } from "./serve";
+import { Store } from "./store";
 import type { Env } from "./types";
 
 const ARTIFACT_ID = /^[A-Za-z0-9_-]{14}$/;
@@ -39,6 +40,25 @@ export async function serveReviewPage(c: Context<{ Bindings: Env }>): Promise<Re
   const url = new URL(c.req.url);
   const artifactOrigin = url.hostname === c.env.API_HOST ? `https://${c.env.ARTIFACT_HOST}` : "";
 
+  // Passcode-protected artifacts gate the shell itself. Unlock lives on the
+  // artifact host (where the sd_unlock cookie is scoped), so the API-host copy
+  // of a protected review page just points there.
+  const store = new Store(c.env.DB, c.env.BLOBS);
+  const gate = await store.getArtifactGate(id);
+  let viewerToken = "";
+  if (gate?.hasPasscode && gate.status === "active") {
+    if (url.hostname === c.env.API_HOST) {
+      return c.redirect(`https://${c.env.ARTIFACT_HOST}/review/${id}`, 302);
+    }
+    const cookie = readCookie(c.req.raw, `sd_unlock_${id}`);
+    if (!cookie || !(await store.checkViewerToken(id, cookie))) {
+      return unlockPage(id, { status: 200, error: false, next: `/review/${id}` });
+    }
+    // The sandboxed doc iframe cannot present the cookie (opaque origin), so
+    // the rail appends this token — never the passcode — to the iframe URL.
+    viewerToken = (await store.viewerToken(id)) ?? "";
+  }
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -50,7 +70,7 @@ export async function serveReviewPage(c: Context<{ Bindings: Env }>): Promise<Re
 <link rel="stylesheet" href="/review/app.css">
 </head>
 <body>
-<div id="root" data-artifact-id="${escapeHtml(id)}" data-artifact-origin="${escapeHtml(artifactOrigin)}"></div>
+<div id="root" data-artifact-id="${escapeHtml(id)}" data-artifact-origin="${escapeHtml(artifactOrigin)}"${viewerToken ? ` data-viewer-token="${escapeHtml(viewerToken)}"` : ""}></div>
 <script type="module" src="/review/app.js"></script>
 </body>
 </html>

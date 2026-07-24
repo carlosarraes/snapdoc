@@ -95,7 +95,8 @@ COLLECT FEEDBACK (anyone with the link, no account)
   snapdoc comments reply <id> <comment-id> "answer"   # respond in-thread
   Reviewers highlight text on the review page and comment on the exact span.
   Read it back with the quoted context to drive the next version — reader lines
-  show "(reader)" and the quote. Reader comments and --passcode are exclusive.
+  show "(reader)" and the quote. Protected artifacts work too: readers unlock
+  in the browser; agents add --passcode (or SNAPDOC_PASSCODE) to comments reply.
   Threads whose quoted text no longer appears in the current version are
   dropped from "snapdoc comments" by default (stale feedback); pass
   --include-orphaned (-o) to see them, marked [orphaned].

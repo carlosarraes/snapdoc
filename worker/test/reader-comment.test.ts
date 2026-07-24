@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { API_BASE, expectError, mintToken, publish } from "./helpers";
+import { API_BASE, ARTIFACT_BASE, expectError, mintToken, publish } from "./helpers";
 
 interface ReaderComment {
   id: string;
@@ -307,19 +307,140 @@ describe("reader comments — unified agent read-back", () => {
   });
 });
 
-describe("reader comments — passcode mutual exclusion", () => {
-  it("refuses to enable comments alongside a passcode", async () => {
-    const tok = await mintToken();
-    // publish + passcode + ?comments=1 in one shot
-    await expectError(
-      await publish({ token: tok.token, comments: true, passcode: "s3cret" }),
-      400,
-      "invalid_request",
-    );
+describe("reader comments — passcode-protected artifacts", () => {
+  const PW = "hunter2";
 
-    // toggling comments on a passcode-protected artifact is refused
-    const protectedId = await publishArtifact(tok.token, { passcode: "s3cret" });
-    await expectError(await enableComments(protectedId, tok.token), 400, "invalid_request");
+  async function protectedArtifact(): Promise<{ id: string; token: string }> {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true, passcode: PW });
+    return { id, token: tok.token };
+  }
+
+  function withPasscode(passcode: string, ip = "6.6.6.6"): Record<string, string> {
+    return { "X-Snapdoc-Passcode": passcode, "CF-Connecting-IP": ip };
+  }
+
+  it("publishes with both comments and a passcode, and the toggle works too", async () => {
+    const { id } = await protectedArtifact();
+    const tok = await mintToken();
+    const toggledId = await publishArtifact(tok.token, { passcode: PW });
+    const toggled = await enableComments(toggledId, tok.token);
+    expect(toggled.status).toBe(200);
+    expect(id).toBeTruthy();
+  });
+
+  it("locks all reader endpoints without an unlock cookie or passcode header", async () => {
+    const { id } = await protectedArtifact();
+
+    const meta = await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`);
+    await expectError(meta, 401, "passcode_required");
+
+    await expectError(await readReader(id), 401, "passcode_required");
+    await expectError(
+      await postReader(id, { author_name: "Ana", body: "x", anchor: ANCHOR }),
+      401,
+      "passcode_required",
+    );
+  });
+
+  it("does not leak the title or versions of a locked artifact", async () => {
+    const tok = await mintToken();
+    const res = await publish({ token: tok.token, comments: true, passcode: PW, title: "Top Secret Plan" });
+    const { id } = (await res.json()) as { id: string };
+    const meta = await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`);
+    expect(meta.status).toBe(401);
+    expect(await meta.text()).not.toContain("Top Secret Plan");
+  });
+
+  it("accepts a correct X-Snapdoc-Passcode header on every endpoint", async () => {
+    const { id } = await protectedArtifact();
+
+    const meta = await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`, { headers: withPasscode(PW) });
+    expect(meta.status).toBe(200);
+
+    const posted = await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...withPasscode(PW) },
+      body: JSON.stringify({ author_name: "Ana", body: "note", anchor: ANCHOR }),
+    });
+    expect(posted.status).toBe(201);
+    const root = (await posted.json()) as ReaderComment;
+
+    const list = await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}/comments`, { headers: withPasscode(PW) });
+    expect(list.status).toBe(200);
+
+    const patched = await SELF.fetch(`${API_BASE}/v1/reader/comments/${root.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...withPasscode(PW) },
+      body: JSON.stringify({ resolved: true, author_name: "Carlos" }),
+    });
+    expect(patched.status).toBe(200);
+  });
+
+  it("rejects a wrong header passcode and rate-limits repeated failures", async () => {
+    const { id } = await protectedArtifact();
+    const ip = "7.7.7.7";
+    await expectError(
+      await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`, { headers: withPasscode("wrong", ip) }),
+      401,
+      "passcode_incorrect",
+    );
+    // Failed guesses consume the per-IP comment budget (20/h in test vars);
+    // once exhausted, further guesses are refused before verification.
+    for (let i = 0; i < 19; i++) {
+      await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`, { headers: withPasscode("wrong", ip) });
+    }
+    await expectError(
+      await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`, { headers: withPasscode("wrong", ip) }),
+      429,
+      "rate_limited",
+    );
+  });
+
+  it("honors the unlock cookie across reader routes and gates delete", async () => {
+    const { id } = await protectedArtifact();
+
+    const unlock = await SELF.fetch(`${ARTIFACT_BASE}/${id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: PW }),
+      redirect: "manual",
+    });
+    expect(unlock.status).toBe(303);
+    const unlockCookie = (unlock.headers.get("Set-Cookie") ?? "").split(";")[0];
+    expect(unlockCookie).toContain(`sd_unlock_${id}=`);
+
+    // Post with the unlock cookie (artifact-host reader route, same origin as the cookie).
+    const posted = await SELF.fetch(`${ARTIFACT_BASE}/v1/reader/artifacts/${id}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: unlockCookie },
+      body: JSON.stringify({ author_name: "Ana", body: "note", anchor: ANCHOR }),
+    });
+    expect(posted.status).toBe(201);
+    const reviewerCookie = cookieFrom(posted)!;
+    const root = (await posted.json()) as ReaderComment;
+
+    // Delete still needs the reviewer cookie, and now also the unlock.
+    await expectError(
+      await SELF.fetch(`${API_BASE}/v1/reader/comments/${root.id}`, {
+        method: "DELETE",
+        headers: { Cookie: reviewerCookie },
+      }),
+      401,
+      "passcode_required",
+    );
+    const deleted = await SELF.fetch(`${API_BASE}/v1/reader/comments/${root.id}`, {
+      method: "DELETE",
+      headers: { Cookie: `${reviewerCookie}; ${unlockCookie}` },
+    });
+    expect(deleted.status).toBe(200);
+  });
+
+  it("keeps unprotected artifacts working without any credentials", async () => {
+    const tok = await mintToken();
+    const id = await publishArtifact(tok.token, { comments: true });
+    expect((await SELF.fetch(`${API_BASE}/v1/reader/artifacts/${id}`)).status).toBe(200);
+    expect((await postReader(id, { author_name: "Ana", body: "x", anchor: ANCHOR })).status).toBe(201);
   });
 });
 

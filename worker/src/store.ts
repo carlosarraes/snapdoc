@@ -446,9 +446,6 @@ export class Store {
     assets?: UploadAsset[];
     artifactHost?: string;
   }): Promise<Artifact & { unresolvedRefs?: string[] }> {
-    if (input.commentsEnabled && input.passcode) {
-      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
-    }
     const id = randomId(ARTIFACT_ID_LENGTH);
     const now = new Date();
     const createdAt = isoNow(now);
@@ -617,12 +614,8 @@ export class Store {
       throw new StoreError("kind_mismatch", "Cannot add a document version to a video artifact.");
     }
 
-    // A new version may flip the comment opt-in; unspecified keeps the current
-    // setting. Reader comments and a passcode remain mutually exclusive.
+    // A new version may flip the comment opt-in; unspecified keeps the current setting.
     const commentsEnabled = input.commentsEnabled ?? current.commentsEnabled;
-    if (commentsEnabled && current.hasPasscode) {
-      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
-    }
 
     const now = new Date();
     const createdAt = isoNow(now);
@@ -930,16 +923,13 @@ export class Store {
     return (await this.fetchArtifact(id))!;
   }
 
-  // Owner opt-in toggle for the anonymous reader-comment path. Enabling is
-  // refused on a passcode-protected artifact (the review page's sandboxed iframe
-  // cannot complete the unlock flow, so the two features are mutually exclusive).
+  // Owner opt-in toggle for the anonymous reader-comment path. Works on
+  // passcode-protected artifacts too: the review page gates server-side via
+  // the unlock cookie and hands the doc iframe a viewer token.
   async setCommentsEnabled(id: string, enabled: boolean): Promise<Artifact> {
     const current = await this.fetchArtifact(id);
     if (!current) throw new StoreError("not_found", "Artifact not found.");
     if (current.status === "deleted") throw new StoreError("not_active", "Artifact has been deleted.");
-    if (enabled && current.hasPasscode) {
-      throw new StoreError("invalid_request", "Reader comments and a passcode cannot both be enabled on an artifact.");
-    }
     await this.db.prepare("UPDATE artifacts SET comments_enabled = ?1 WHERE id = ?2").bind(enabled ? 1 : 0, id).run();
     return (await this.fetchArtifact(id))!;
   }

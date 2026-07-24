@@ -6,6 +6,10 @@ const ARTIFACT_ID = rootEl.dataset.artifactId ?? "";
 // Prod: the worker injects the (cross-origin) artifact host. Dev: it's empty, so
 // fall back to our own origin — the doc is same-origin under wrangler dev.
 const ARTIFACT_ORIGIN = rootEl.dataset.artifactOrigin || location.origin;
+// Present on passcode-protected artifacts after the shell's server-side
+// unlock check: the sandboxed doc iframe cannot carry the HttpOnly unlock
+// cookie (opaque origin), so its URL carries this viewer token instead.
+const VIEWER_TOKEN = rootEl.dataset.viewerToken ?? "";
 const NAME_KEY = "snapdoc_reviewer_name";
 const EMAIL_KEY = "snapdoc_reviewer_email";
 const COLLAPSE_KEY = "snapdoc_rail_collapsed";
@@ -24,7 +28,7 @@ type AnnMsg =
 
 function docUrl(version: number, current: number): string {
   const path = version === current ? `/${ARTIFACT_ID}` : `/${ARTIFACT_ID}/v/${version}`;
-  return `${ARTIFACT_ORIGIN}${path}?annotate=1`;
+  return `${ARTIFACT_ORIGIN}${path}?annotate=1${VIEWER_TOKEN ? `&vt=${encodeURIComponent(VIEWER_TOKEN)}` : ""}`;
 }
 
 export default function App() {
@@ -120,7 +124,11 @@ export default function App() {
         setVersion(m.current_version);
         setComments(c.comments);
       } catch (e) {
-        if (live) setLoadError(e instanceof ApiError ? e.message : "Failed to load this document.");
+        if (live && e instanceof ApiError && e.code === "passcode_required") {
+          setLoadError("Your unlock session expired — reload this page to enter the passcode again.");
+        } else if (live) {
+          setLoadError(e instanceof ApiError ? e.message : "Failed to load this document.");
+        }
       }
     })();
     return () => {

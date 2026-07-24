@@ -4,6 +4,7 @@
 // static assets (landing page).
 import { buildMediaResponse, parseSingleRange, videoCacheControl } from "./media-range";
 import { escapeHtml, MERMAID_DOCUMENT_MARKER, MERMAID_RUNTIME_PATH } from "./markdown";
+import { hashIp } from "./reader-api";
 import { Store, type Artifact, type ArtifactVersion } from "./store";
 import { videoFileUrl, videoPosterUrl, videoVersionFileUrl, videoVersionPosterUrl } from "./http";
 import { renderVideoPage, VIDEO_PAGE_CSP } from "./video-page";
@@ -105,10 +106,22 @@ function annotateCsp(apiHost: string): string {
 // the HTMLRewriter streaming pattern in assets.ts; falls back to document end
 // for raw-HTML artifacts that have no <body>. The src is relative so it loads
 // from whichever host is serving the doc (ASSETS answers on both).
-async function injectAnnotator(html: string): Promise<string> {
+async function injectAnnotator(html: string, assetVt?: { id: string; token: string }): Promise<string> {
   const tag = `<script src="/review/annotator.js" defer></script>`;
   let bodySeen = false;
   const rewriter = new HTMLRewriter()
+    .on("img", {
+      // Protected artifacts: the sandboxed iframe's image loads never carry
+      // the unlock cookie (opaque origin → cross-site → SameSite=Lax drops
+      // it), so same-artifact hosted assets get the viewer token inline.
+      element(el) {
+        if (!assetVt) return;
+        const src = el.getAttribute("src");
+        if (src && src.includes(`/${assetVt.id}/a/`) && !src.includes("?")) {
+          el.setAttribute("src", `${src}?vt=${assetVt.token}`);
+        }
+      },
+    })
     .on(`script[src^="/review/mermaid-"]`, {
       // The review iframe is sandboxed without allow-same-origin, so its
       // origin is opaque and the runtime fetch is cross-origin; SRI rejects
@@ -166,7 +179,19 @@ p { color: #59636e; }
   });
 }
 
-function unlockPage(id: string, opts: { status: number; error: boolean }): Response {
+// Post-unlock destination. Only fixed same-artifact paths pass; everything
+// else (other artifacts, absolute or protocol-relative URLs) falls back to the
+// artifact page, so the unlock flow can never become an open redirect.
+export function validNext(id: string, next: unknown): string {
+  if (typeof next !== "string") return `/${id}`;
+  if (next === `/${id}` || next === `/review/${id}` || new RegExp(`^/${id}/v/\\d{1,9}$`).test(next)) return next;
+  return `/${id}`;
+}
+
+export function unlockPage(
+  id: string,
+  opts: { status: number; error: boolean; next?: string; message?: string },
+): Response {
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -193,8 +218,9 @@ button { padding: 0.5rem 1rem; font-size: 1rem; border: 0; border-radius: 6px; b
 <body>
 <main>
 <h1>Passcode required</h1>
-<p>This snapdoc artifact is protected.${opts.error ? ' <span class="error">Incorrect passcode.</span>' : ""}</p>
+<p>This snapdoc artifact is protected.${opts.error ? ` <span class="error">${escapeHtml(opts.message ?? "Incorrect passcode.")}</span>` : ""}</p>
 <form method="POST" action="/${id}/unlock">
+<input type="hidden" name="next" value="${escapeHtml(validNext(id, opts.next))}">
 <input type="password" name="passcode" aria-label="Passcode" autofocus required>
 <button type="submit">Unlock</button>
 </form>
@@ -215,7 +241,18 @@ button { padding: 0.5rem 1rem; font-size: 1rem; border: 0; border-radius: 6px; b
   });
 }
 
-function readCookie(request: Request, name: string): string | null {
+// Unlock check for protected artifacts: the HttpOnly cookie for direct
+// visits, or a ?vt= viewer token for requests the cookie cannot reach — the
+// review page's sandboxed iframe has an opaque origin, so its (cross-site)
+// document and image loads never carry SameSite=Lax cookies.
+async function isUnlocked(id: string, request: Request, store: Store): Promise<boolean> {
+  const cookie = readCookie(request, `sd_unlock_${id}`);
+  if (cookie && (await store.checkViewerToken(id, cookie))) return true;
+  const vt = new URL(request.url).searchParams.get("vt");
+  return !!vt && (await store.checkViewerToken(id, vt));
+}
+
+export function readCookie(request: Request, name: string): string | null {
   const header = request.headers.get("Cookie");
   if (!header) return null;
   for (const part of header.split(";")) {
@@ -226,7 +263,7 @@ function readCookie(request: Request, name: string): string | null {
   return null;
 }
 
-async function handleUnlock(id: string, request: Request, store: Store): Promise<Response> {
+async function handleUnlock(id: string, request: Request, store: Store, env: Env): Promise<Response> {
   const gate = await store.getArtifactGate(id);
   if (!gate || gate.status === "deleted") {
     return statusPage({ status: 404, heading: "Artifact not found", message: "This snapdoc link does not exist." });
@@ -237,15 +274,32 @@ async function handleUnlock(id: string, request: Request, store: Store): Promise
   }
   const form = await request.formData();
   const passcode = String(form.get("passcode") ?? "");
+  const next = validNext(id, form.get("next"));
+
+  // Failed attempts consume the artifact's comment budget — without this the
+  // unlock form is an unthrottled PBKDF2 guessing oracle.
+  const ipHash = await hashIp(request.headers.get("CF-Connecting-IP") ?? "unknown", env.COMMENT_IP_SALT ?? "");
+  const rate = await store.checkCommentRateLimit(
+    ipHash,
+    id,
+    Number(env.COMMENT_RATE_LIMIT_PER_IP_PER_HOUR),
+    Number(env.COMMENT_RATE_LIMIT_PER_ARTIFACT_PER_HOUR),
+  );
+  if (!rate.allowed) {
+    return unlockPage(id, { status: 429, error: true, next, message: "Too many attempts; try again later." });
+  }
   if (!(await store.verifyPasscode(id, passcode))) {
-    return unlockPage(id, { status: 401, error: true });
+    await store.recordCommentEvent(ipHash, id);
+    return unlockPage(id, { status: 401, error: true, next });
   }
   const token = await store.viewerToken(id);
+  // Path=/ so the cookie also reaches /review/<id> and /v1/reader/* — the
+  // review page and its same-origin reader-API calls gate on it.
   return new Response(null, {
     status: 303,
     headers: {
-      Location: `/${id}`,
-      "Set-Cookie": `sd_unlock_${id}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/${id}; Max-Age=43200`,
+      Location: next,
+      "Set-Cookie": `sd_unlock_${id}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200`,
       "Cache-Control": "no-store",
     },
   });
@@ -259,10 +313,8 @@ async function serveAsset(id: string, hash: string, request: Request, store: Sto
   if (gate.status === "expired" || gate.status === "deleted") {
     return new Response("Gone", { status: 410, headers: ASSET_HEADERS });
   }
-  if (gate.hasPasscode) {
-    const cookie = readCookie(request, `sd_unlock_${id}`);
-    const unlocked = cookie ? await store.checkViewerToken(id, cookie) : false;
-    if (!unlocked) return new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS });
+  if (gate.hasPasscode && !(await isUnlocked(id, request, store))) {
+    return new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS });
   }
   const asset = await store.getServableAsset(id, hash);
   if (!asset) return new Response("Not found", { status: 404, headers: ASSET_HEADERS });
@@ -335,18 +387,14 @@ async function gateArtifact(
           : new Response("Gone", { status: 410, headers: ASSET_HEADERS }),
     };
   }
-  if (artifact.hasPasscode) {
-    const cookie = readCookie(request, `sd_unlock_${id}`);
-    const unlocked = cookie ? await store.checkViewerToken(id, cookie) : false;
-    if (!unlocked) {
-      return {
-        ok: false,
-        response:
-          mode === "page"
-            ? unlockPage(id, { status: 200, error: false })
-            : new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS }),
-      };
-    }
+  if (artifact.hasPasscode && !(await isUnlocked(id, request, store))) {
+    return {
+      ok: false,
+      response:
+        mode === "page"
+          ? unlockPage(id, { status: 200, error: false, next: new URL(request.url).pathname })
+          : new Response("Unauthorized", { status: 401, headers: ASSET_HEADERS }),
+    };
   }
   return { ok: true, artifact, versions: record.versions };
 }
@@ -536,7 +584,7 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
     }
-    return handleUnlock(unlockMatch[1], request, store);
+    return handleUnlock(unlockMatch[1], request, store, env);
   }
 
   const assetMatch = ASSET_PATTERN.exec(url.pathname);
@@ -609,7 +657,8 @@ export async function serveArtifactHost(request: Request, env: Env): Promise<Res
   // the CSP just enough to be framed by, and load its script from, the API host.
   // Only honored when the owner opted in; the bare /:id stays pristine.
   if (url.searchParams.get("annotate") === "1" && gate.commentsEnabled) {
-    const body = request.method === "HEAD" ? null : await injectAnnotator(content.html);
+    const assetVt = gate.hasPasscode ? { id, token: (await store.viewerToken(id))! } : undefined;
+    const body = request.method === "HEAD" ? null : await injectAnnotator(content.html, assetVt);
     return new Response(body, {
       status: 200,
       headers: {

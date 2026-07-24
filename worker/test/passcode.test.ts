@@ -92,6 +92,45 @@ describe("passcode-protected artifacts", () => {
     expect(view.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  it("sets the unlock cookie with Path=/ so it reaches review and reader routes", async () => {
+    const tok = await mintToken();
+    const art = (await (await publishProtected(tok.token, "pw")).json()) as { id: string };
+    const unlock = await SELF.fetch(`${ARTIFACT_BASE}/${art.id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: "pw" }),
+      redirect: "manual",
+    });
+    const setCookie = unlock.headers.get("Set-Cookie")!;
+    expect(setCookie).toContain("Path=/;");
+    expect(setCookie).not.toContain(`Path=/${art.id}`);
+  });
+
+  it("returns to a validated same-artifact destination after unlocking", async () => {
+    const tok = await mintToken();
+    const art = (await (await publishProtected(tok.token, "pw")).json()) as { id: string };
+    const unlockWith = (next: string, passcode = "pw") =>
+      SELF.fetch(`${ARTIFACT_BASE}/${art.id}/unlock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ passcode, next }),
+        redirect: "manual",
+      });
+
+    expect((await unlockWith(`/review/${art.id}`)).headers.get("Location")).toBe(`/review/${art.id}`);
+    expect((await unlockWith(`/${art.id}/v/2`)).headers.get("Location")).toBe(`/${art.id}/v/2`);
+    // Anything else — other artifacts, absolute or protocol-relative URLs —
+    // falls back to the artifact page: no open redirect.
+    for (const evil of ["https://evil.com", "//evil.com", "/AAAAAAAAAAAAAA", `/review/${art.id}/x`]) {
+      expect((await unlockWith(evil)).headers.get("Location")).toBe(`/${art.id}`);
+    }
+
+    // A wrong passcode re-renders the form with the destination preserved.
+    const wrong = await unlockWith(`/review/${art.id}`, "nope");
+    expect(wrong.status).toBe(401);
+    expect(await wrong.text()).toContain(`name="next" value="/review/${art.id}"`);
+  });
+
   it("ignores a tampered cookie", async () => {
     const tok = await mintToken();
     const art = (await (await publishProtected(tok.token, "pw")).json()) as { id: string };

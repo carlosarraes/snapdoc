@@ -566,7 +566,7 @@ describe("comment threads and resolution", () => {
 describe("reader comments (store)", () => {
   const ANCHOR = { exact: "metric", prefix: "the ", suffix: " here", start: 4, end: 10 };
 
-  it("toggles comments_enabled and refuses it alongside a passcode", async () => {
+  it("toggles comments_enabled, including on passcode-protected artifacts", async () => {
     const store = makeStore();
     const tok = await makeToken(store);
     const art = await makeArtifact(store, tok.id);
@@ -579,7 +579,25 @@ describe("reader comments (store)", () => {
     const locked = await store.createArtifact({
       tokenId: tok.id, title: null, ttlSeconds: DAY, contentType: "text/html", body: HTML, passcode: "s3cret",
     });
-    await expect(store.setCommentsEnabled(locked.id, true)).rejects.toMatchObject({ code: "invalid_request" });
+    const unlocked = await store.setCommentsEnabled(locked.id, true);
+    expect(unlocked.commentsEnabled).toBe(true);
+    expect(unlocked.hasPasscode).toBe(true);
+  });
+
+  it("creates with both passcode and comments, and republishing keeps both", async () => {
+    const store = makeStore();
+    const tok = await makeToken(store);
+    const art = await store.createArtifact({
+      tokenId: tok.id, title: null, ttlSeconds: DAY, contentType: "text/html", body: HTML,
+      passcode: "s3cret", commentsEnabled: true,
+    });
+    expect(art.hasPasscode).toBe(true);
+    expect(art.commentsEnabled).toBe(true);
+
+    // No commentsEnabled input: the ?? fallback must not re-trip any check.
+    const v2 = await store.addVersion(art.id, { defaultTtlSeconds: DAY, contentType: "text/html", body: "<p>v2</p>" });
+    expect(v2.hasPasscode).toBe(true);
+    expect(v2.commentsEnabled).toBe(true);
   });
 
   it("stores and round-trips a reader anchor; team comments have none", async () => {

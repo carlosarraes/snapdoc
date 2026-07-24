@@ -110,8 +110,9 @@ body, per RFC 7233 — never the `{ "error": ... }` JSON shape.
 [Video artifacts](#video-artifacts) below). `has_passcode` is true when the
 artifact is passcode-protected. `comments_enabled` is true when the owner has
 opted the artifact into public reader comments (see the review page below); it
-is mutually exclusive with `has_passcode` and never true for a video (reader
-comments are document-only). `token_name` appears only in admin responses.
+combines freely with `has_passcode` (readers unlock first) and is never true
+for a video (reader comments are document-only). `token_name` appears only in
+admin responses.
 
 **Video artifacts** carry every field above plus additive fields — never a
 different shape, so a client that only understands documents can ignore them:
@@ -174,7 +175,8 @@ uploaded. `audio_codec` is `null` for a video with no audio track.
   - `title` (optional, ≤200 chars)
   - `ttl` (optional, duration string: `12h`, `7d`, `90d`; default `14d`)
   - `comments` (optional, `0` or `1`) — opt the artifact into public reader
-    comments. `invalid_request` if combined with `X-Snapdoc-Passcode`.
+    comments. Combines with `X-Snapdoc-Passcode`: readers unlock before the
+    review page loads.
 - Headers:
   - `X-Snapdoc-Passcode` (optional) — protects the new artifact with a passcode.
     Sent as a header rather than a query param so it is not logged. Hashed with
@@ -378,9 +380,8 @@ images).
 ### POST /v1/artifacts/{id}/comment-settings — toggle reader comments
 
 - Body `{ "enabled": true|false }`. Opts the artifact into (or out of) public
-  reader comments. 200 → the Artifact object with the updated `comments_enabled`.
-- `invalid_request` if enabling on a passcode-protected artifact (mutually
-  exclusive). 404 `not_found`, 409 `not_active` if deleted.
+  reader comments — passcode-protected artifacts included (their review flow
+  gates on the unlock cookie). 404 `not_found`, 409 `not_active` if deleted.
 
 ### GET /v1/artifacts/{id}/content — read content (Markdown by default)
 
@@ -480,8 +481,15 @@ intercepts `/v1/admin/*` at the edge, making headless bootstrap impossible there
 When an artifact has `comments_enabled`, anyone with the link can comment on
 specific text via a trusted first-party **review page** — no account. These
 answer on **both hosts** — prefer the artifact host (`/review/{id}` next to the
-artifact itself); the API host serves the same page for older links. They are
-**unauthenticated** and never expose team comments or internal fields. Author identity is pseudonymous (a typed display name + optional
+artifact itself); the API host serves the same page for older links (and 302s
+protected artifacts to the artifact host, where the unlock cookie lives). They
+are **unauthenticated** for unprotected artifacts and never expose team
+comments or internal fields. **Passcode-protected artifacts lock every reader
+endpoint**: requests need a valid `sd_unlock_{id}` cookie (browser flow) or an
+`X-Snapdoc-Passcode` header (agents/CLI). Missing → 401 `passcode_required`;
+wrong → 401 `passcode_incorrect`; repeated wrong header attempts are
+rate-limited (429) against the artifact's comment budget. The review page
+itself shows the unlock form first and returns to `/review/{id}` after. Author identity is pseudonymous (a typed display name + optional
 unverified email). Writes are gated by the owner's opt-in and rate-limited per-IP
 and per-artifact.
 
@@ -532,7 +540,7 @@ and per-artifact.
 | `/{id}/a/{sha256}` | Hosted image bytes; `Content-Type` from the stored type, `Cache-Control: public, max-age=31536000, immutable`, `nosniff`. Same status/passcode gate as the page (404 missing, 410 expired/deleted, 401 if locked). `/{id}/v/{n}/a/{sha256}` also accepted. |
 | `/{id}/media/{filename}.mp4` | Video byte-range streaming (see below). `/{id}/v/{n}/media/{filename}.mp4` also accepted. |
 | `/{id}/poster.{jpg\|png}` | Video poster image (whichever extension matches the sniffed upload). `/{id}/v/{n}/poster.{jpg\|png}` also accepted. |
-| `POST /{id}/unlock` | Passcode entry: form field `passcode`; 303 + viewer cookie on success, 401 unlock page on failure |
+| `POST /{id}/unlock` | Passcode entry: form fields `passcode` + optional `next` (same-artifact paths only); 303 + viewer cookie on success, 401 unlock page on failure, 429 when rate-limited |
 
 Headers on artifact responses: `X-Robots-Tag: noindex, nofollow`,
 `Content-Security-Policy` allowing self-contained inline CSS/JS but no privileged reach,
@@ -548,9 +556,22 @@ the selectable annotation text.
 **Passcode gate.** When an artifact is passcode-protected, `GET /{id}` returns a
 200 unlock page (its own CSP relaxes `form-action` to `'self'`) unless the request
 carries a valid `sd_unlock_{id}` cookie. The cookie is an HMAC of the stored hash,
-set by `POST /{id}/unlock` (HttpOnly, Secure, SameSite=Lax, Path=`/{id}`, 12h).
-Protected content is served `Cache-Control: private, no-store` so shared caches
-never hold it.
+set by `POST /{id}/unlock` (HttpOnly, Secure, SameSite=Lax, Path=`/`, 12h — the
+broad path lets it reach `/review/{id}` and `/v1/reader/*` on the same host).
+The unlock form carries a `next` field; only same-artifact destinations
+(`/{id}`, `/{id}/v/{n}`, `/review/{id}`) are honored, anything else falls back
+to `/{id}` — never an open redirect. Failed unlock attempts are rate-limited
+against the artifact's comment budget. Protected content is served
+`Cache-Control: private, no-store` so shared caches never hold it.
+
+**Viewer token (`?vt=`).** The review page's doc iframe is sandboxed with an
+opaque origin, so it can never present the unlock cookie. After the shell's own
+unlock check passes, it embeds the viewer token and the rail appends `?vt=` to
+the framed document and its hosted-image URLs; the server accepts a valid `vt`
+as unlock-equivalent on those routes. The token is the same HMAC the cookie
+holds — never the passcode — but note it is a standing per-artifact view grant
+(passcodes are set only at creation, so there is no rotation path), and it
+appears in server request logs.
 
 **Video media/poster serving.** `/{id}/media/{filename}.mp4` streams the raw
 MP4 bytes: `GET`/`HEAD` only (405 otherwise), `Accept-Ranges: bytes`, and a

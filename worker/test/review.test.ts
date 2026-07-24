@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { API_BASE } from "./helpers";
+import { API_BASE, mintToken, publish } from "./helpers";
 
 describe("review page", () => {
   it("serves the review shell publicly with a bespoke CSP", async () => {
@@ -40,5 +40,23 @@ describe("review page", () => {
   it("does not serve the shell for non-id bundle paths under /review", async () => {
     const res = await SELF.fetch(`${API_BASE}/review/annotator.js`);
     expect(await res.text()).not.toContain("data-artifact-origin");
+  });
+
+  it("redirects protected artifacts to the artifact host, where the unlock cookie lives", async () => {
+    const tok = await mintToken();
+    const { id } = (await (
+      await publish({ token: tok.token, comments: true, passcode: "pw" })
+    ).json()) as { id: string };
+    const res = await SELF.fetch(`${API_BASE}/review/${id}`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(`https://snapdoc.carraes.dev/review/${id}`);
+  });
+
+  it("keeps unprotected artifacts served on the API host unchanged", async () => {
+    const tok = await mintToken();
+    const { id } = (await (await publish({ token: tok.token, comments: true })).json()) as { id: string };
+    const res = await SELF.fetch(`${API_BASE}/review/${id}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`data-artifact-id="${id}"`);
   });
 });

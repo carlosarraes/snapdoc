@@ -163,7 +163,7 @@ export function ArtifactDetail() {
                 expire
               </button>
             )}
-            {a.kind !== "video" && a.status === "active" && !a.has_passcode && (
+            {a.kind !== "video" && a.status === "active" && (
               <button className="btn" onClick={() => toggleComments(!a.comments_enabled)}>
                 {a.comments_enabled ? "disable comments" : "enable comments"}
               </button>
