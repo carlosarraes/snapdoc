@@ -14,7 +14,7 @@ type ReadCmd struct {
 	Raw bool   `help:"Output the original HTML instead of Markdown."`
 	// Flag is --rev, not --version: the root VersionFlag already owns --version.
 	Version  int    `name:"rev" help:"Read a specific version (default: latest)."`
-	Passcode string `help:"Passcode for a protected artifact (or set SNAPDOC_PASSCODE)." env:"SNAPDOC_PASSCODE"`
+	Passcode string `help:"Passcode for a protected artifact (default: SNAPDOC_PASSCODE, then the config file's passcode)." env:"SNAPDOC_PASSCODE"`
 }
 
 func (c *ReadCmd) Run(g *Globals, streams *IO) error {
@@ -27,7 +27,10 @@ func (c *ReadCmd) Run(g *Globals, streams *IO) error {
 		format = "html"
 	}
 
-	passcode := c.Passcode
+	passcode, err := g.passcodeOr(c.Passcode)
+	if err != nil {
+		return err
+	}
 	res, err := client.ReadContent(c.ID, format, c.Version, passcode)
 	// Protected doc, no passcode given, attached to a terminal: prompt once and
 	// retry. Agents (non-TTY) get the error directly so they can pass

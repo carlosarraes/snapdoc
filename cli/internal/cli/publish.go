@@ -21,7 +21,7 @@ type PublishCmd struct {
 	TTL        string `help:"Time to live, e.g. 12h, 7d (server-validated)."`
 	Update     string `help:"Artifact ID to update with a new version." placeholder:"ID"`
 	Markdown   bool   `help:"Treat input as Markdown (auto-detected for .md/.markdown files)."`
-	Passcode   string `help:"Protect a new artifact with a passcode (applies only when creating)."`
+	Passcode   string `help:"Protect a new artifact with a passcode (applies only when creating; default: SNAPDOC_PASSCODE, then the config file's passcode)." env:"SNAPDOC_PASSCODE"`
 	Comments   bool   `help:"Allow anyone with the link to post line-anchored comments via the review page."`
 	NoAssets   bool   `help:"Don't auto-upload local images; publish references as-is."`
 	AssetsBase string `help:"Directory to resolve relative image paths against (default: the document's folder, or CWD for stdin)." placeholder:"DIR"`
@@ -92,7 +92,10 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 			artifact, err = client.PublishVersion(p.Update, bytes.NewReader(content), contentType, opts)
 		}
 	} else {
-		opts.Passcode = p.Passcode // passcode is set only when creating an artifact
+		// A passcode is set only when creating an artifact.
+		if opts.Passcode, err = g.passcodeOr(p.Passcode); err != nil {
+			return err
+		}
 		if len(assets) > 0 {
 			artifact, err = client.PublishMultipart(bytes.NewReader(content), contentType, assets, opts)
 		} else {
@@ -119,6 +122,11 @@ func (p *PublishCmd) Run(g *Globals, streams *IO) error {
 		fmt.Fprintf(streams.Stdout, "  Title:   %s\n", artifact.Title)
 	}
 	fmt.Fprintf(streams.Stdout, "  Expires: %s\n", artifact.ExpiresAt)
+	// Never let protection be silent — the passcode may have come from the
+	// config file rather than an explicit flag.
+	if artifact.HasPasscode {
+		fmt.Fprintf(streams.Stdout, "  Passcode: required\n")
+	}
 	fmt.Fprintf(streams.Stdout, "  URL:     %s\n", artifact.URL)
 	return nil
 }
@@ -224,7 +232,10 @@ func (p *PublishCmd) runVideo(g *Globals, streams *IO) error {
 	if p.Update != "" {
 		artifact, err = client.PublishVideoVersion(p.Update, f, opts)
 	} else {
-		opts.Passcode = p.Passcode // passcode is set only when creating an artifact
+		// A passcode is set only when creating an artifact.
+		if opts.Passcode, err = g.passcodeOr(p.Passcode); err != nil {
+			return err
+		}
 		artifact, err = client.PublishVideo(f, opts)
 	}
 	if err != nil {

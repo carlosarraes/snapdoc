@@ -1971,3 +1971,172 @@ func TestPublishCommentsAndPasscodeTogether(t *testing.T) {
 		t.Errorf("want both passcode header and comments=1, got passcode=%q query=%v", srv.reqs[0].passcode, srv.reqs[0].query)
 	}
 }
+
+func writeConfigWithPasscode(t *testing.T, dir, apiURL, token, passcode string) {
+	t.Helper()
+	p := filepath.Join(dir, "snapdoc")
+	if err := os.MkdirAll(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]string{"api_url": apiURL, "token": token, "passcode": passcode})
+	if err := os.WriteFile(filepath.Join(p, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishUsesConfigPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	if _, _, code := runCLI([]string{"publish", "-"}, "<p>x</p>"); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "from-config" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want from-config", srv.reqs[0].passcode)
+	}
+}
+
+func TestPublishPasscodePrecedence(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 201, artifactJSON)
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	// Explicit flag beats the config file.
+	if _, _, code := runCLI([]string{"publish", "-", "--passcode", "from-flag"}, "<p>x</p>"); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "from-flag" {
+		t.Errorf("flag: passcode = %q, want from-flag", srv.reqs[0].passcode)
+	}
+
+	// So does the environment variable.
+	t.Setenv("SNAPDOC_PASSCODE", "from-env")
+	if _, _, code := runCLI([]string{"publish", "-"}, "<p>x</p>"); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[1].passcode != "from-env" {
+		t.Errorf("env: passcode = %q, want from-env", srv.reqs[1].passcode)
+	}
+}
+
+func TestPublishUpdateOmitsConfigPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, artifactJSON)
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	// A passcode applies only when creating; a new version must not send it.
+	if _, _, code := runCLI([]string{"publish", "-", "--update", "x7Kp9qWm2AbCdE"}, "<p>x</p>"); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "" {
+		t.Errorf("update sent passcode %q, want none", srv.reqs[0].passcode)
+	}
+}
+
+func TestReadUsesConfigPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := okServer(t, 200, contentEnvelopeJSON)
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	if _, _, code := runCLI([]string{"read", "x"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "from-config" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want from-config", srv.reqs[0].passcode)
+	}
+}
+
+func TestCommentsReplyUsesConfigPasscode(t *testing.T) {
+	dir := setupEnv(t)
+	srv := newFakeServer(t, func(r recordedReq, w http.ResponseWriter) {
+		w.WriteHeader(201)
+		io.WriteString(w, `{"id":"cmt_r","author":"A","author_kind":"anon","version":1,"body":"b","created_at":"t","parent_id":"cmt_root","resolved":false}`)
+	})
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	if _, _, code := runCLI([]string{"comments", "reply", "x", "cmt_root", "ok", "--name", "A"}, ""); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if srv.reqs[0].passcode != "from-config" {
+		t.Errorf("X-Snapdoc-Passcode = %q, want from-config", srv.reqs[0].passcode)
+	}
+}
+
+func TestLoginSavesPasscodeAndPreservesIt(t *testing.T) {
+	dir := setupEnv(t)
+	p := filepath.Join(dir, "snapdoc", "config.json")
+	readCfg := func() map[string]string {
+		t.Helper()
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]string
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	if _, stderr, code := runCLI([]string{"login", "--api-url", "https://a", "--token", "t1", "--passcode", "shared-pw"}, ""); code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if cfg := readCfg(); cfg["passcode"] != "shared-pw" {
+		t.Errorf("passcode = %q, want shared-pw", cfg["passcode"])
+	}
+
+	// Logging in again without --passcode keeps the saved one.
+	if _, stderr, code := runCLI([]string{"login", "--api-url", "https://a", "--token", "t2"}, ""); code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	cfg := readCfg()
+	if cfg["passcode"] != "shared-pw" || cfg["token"] != "t2" {
+		t.Errorf("config = %v, want passcode kept and token updated", cfg)
+	}
+}
+
+func TestPublishReportsProtectedArtifact(t *testing.T) {
+	dir := setupEnv(t)
+	protectedJSON := `{"id":"x7Kp9qWm2AbCdE","url":"https://snapdoc.carraes.dev/x7Kp9qWm2AbCdE","title":"t","status":"active","current_version":1,"content_type":"text/html","size_bytes":1,"created_at":"c","expires_at":"e","has_passcode":true}`
+	srv := okServer(t, 201, protectedJSON)
+	defer srv.Close()
+	writeConfigWithPasscode(t, dir, srv.URL, "tok", "from-config")
+
+	// Protection is never silent: the output says so even when the passcode
+	// came from config rather than an explicit flag.
+	stdout, _, code := runCLI([]string{"publish", "-"}, "<p>x</p>")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "Passcode: required") {
+		t.Errorf("output missing passcode indicator:\n%s", stdout)
+	}
+}
+
+func TestLoginKeepsSavedValuesWhenPromptsAreEmpty(t *testing.T) {
+	dir := setupEnv(t)
+	writeConfig(t, dir, "https://saved.example", "saved-token")
+
+	// Setting just a passcode must not force re-entering the token: empty
+	// prompt input (or EOF, as for an agent) keeps what is already saved.
+	if _, stderr, code := runCLI([]string{"login", "--passcode", "pw"}, ""); code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "snapdoc", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["api_url"] != "https://saved.example" || cfg["token"] != "saved-token" || cfg["passcode"] != "pw" {
+		t.Errorf("config = %v, want saved api_url/token kept and passcode set", cfg)
+	}
+}

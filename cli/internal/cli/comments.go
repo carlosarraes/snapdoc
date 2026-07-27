@@ -116,7 +116,7 @@ type CommentsReplyCmd struct {
 	CommentID string `arg:"" help:"Comment id of the thread to reply to."`
 	Body      string `arg:"" optional:"" help:"Reply text; '-' or omitted reads stdin."`
 	Name      string `help:"Display name shown on the reply (default: the token's name)."`
-	Passcode  string `help:"Passcode for a protected artifact." env:"SNAPDOC_PASSCODE"`
+	Passcode  string `help:"Passcode for a protected artifact (default: SNAPDOC_PASSCODE, then the config file's passcode)." env:"SNAPDOC_PASSCODE"`
 }
 
 func (c *CommentsReplyCmd) Run(g *Globals, streams *IO) error {
@@ -143,7 +143,11 @@ func (c *CommentsReplyCmd) Run(g *Globals, streams *IO) error {
 		}
 		name = who.Token.Name
 	}
-	cm, err := client.ReplyComment(c.ID, c.CommentID, name, text, c.Passcode)
+	passcode, err := g.passcodeOr(c.Passcode)
+	if err != nil {
+		return err
+	}
+	cm, err := client.ReplyComment(c.ID, c.CommentID, name, text, passcode)
 	if err != nil {
 		return err
 	}

@@ -52,6 +52,21 @@ func (g *Globals) client() (*api.Client, error) {
 	return &api.Client{BaseURL: cfg.APIURL, Token: cfg.Token}, nil
 }
 
+// passcodeOr resolves a command's passcode with the same precedence as the
+// token: the --passcode flag (which kong also fills from SNAPDOC_PASSCODE)
+// wins, otherwise the one saved in the config file. Agents working a set of
+// artifacts that share a passcode therefore never repeat the flag.
+func (g *Globals) passcodeOr(flag string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "", err
+	}
+	return cfg.Passcode, nil
+}
+
 type CLI struct {
 	Globals
 

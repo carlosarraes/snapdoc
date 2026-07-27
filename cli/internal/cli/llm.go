@@ -16,6 +16,12 @@ Built for AI agents: publish a report, share the link, iterate on feedback.
 AUTH
   snapdoc login --api-url <url> --token <sd_live_...>   # or set SNAPDOC_API_URL + SNAPDOC_TOKEN
   snapdoc whoami                                        # verify the token
+  snapdoc login --passcode <code>       # save a default passcode (config file)
+  With a saved passcode (or SNAPDOC_PASSCODE), publish/read/comments reply
+  use it automatically — no --passcode flag needed. Precedence: flag, then
+  env, then config. Pass --passcode only for an artifact using a different
+  one. NOTE: a saved passcode also protects every NEW doc you publish;
+  publish output prints "Passcode: required" whenever that happened.
 
 PUBLISH
   snapdoc publish report.md --title "Q3 review" --ttl 7d
@@ -81,7 +87,8 @@ READ (token-cheap; Markdown by default)
   snapdoc read <id>            # Markdown (fewer tokens than HTML)
   snapdoc read <id> --raw      # original HTML
   snapdoc read <id> --rev 2    # a specific version
-  Add --passcode <code> (or set SNAPDOC_PASSCODE) for protected artifacts.
+  Protected artifacts resolve their passcode from --passcode, SNAPDOC_PASSCODE,
+  or the config file, in that order (see AUTH) — usually nothing to pass.
 
 INSPECT
   snapdoc list --status active        # your artifacts (--all to fetch every page)
@@ -96,7 +103,8 @@ COLLECT FEEDBACK (anyone with the link, no account)
   Reviewers highlight text on the review page and comment on the exact span.
   Read it back with the quoted context to drive the next version — reader lines
   show "(reader)" and the quote. Protected artifacts work too: readers unlock
-  in the browser; agents add --passcode (or SNAPDOC_PASSCODE) to comments reply.
+  in the browser; agents reuse the saved/env passcode (see AUTH), or pass
+  --passcode explicitly.
   Threads whose quoted text no longer appears in the current version are
   dropped from "snapdoc comments" by default (stale feedback); pass
   --include-orphaned (-o) to see them, marked [orphaned].

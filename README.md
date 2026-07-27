@@ -66,8 +66,13 @@ snapdoc publish recording.mp4 --update <id>
 | `llm` | Print a compact, agent-oriented guide to the whole CLI |
 
 `--json` (global) prints raw JSON instead of human text — handy for scripts and agents.
-`--passcode` protects a new artifact; viewers get a browser unlock page. Markdown
-bodies may carry `---` frontmatter (`title`, `toc: true`); headings get anchor links.
+`--passcode` protects a new artifact; viewers get a browser unlock page. Save a
+default with `snapdoc login --passcode <code>` (or `SNAPDOC_PASSCODE`) and
+`publish`, `read`, and `comments reply` all use it automatically — pass the flag
+only for an artifact with a different one. A saved passcode protects every new
+document you publish, so publish output prints `Passcode: required` when it did.
+Markdown bodies may carry `---` frontmatter (`title`, `toc: true`); headings get
+anchor links.
 
 **Feedback loop:** teammates comment on an artifact (via the Access-gated dashboard),
 and an agent reads that feedback back with `snapdoc comments <id>` to inform the next
@@ -112,7 +117,7 @@ Resolved with precedence **flag > env > config file > default**.
 
 | | |
 |---|---|
-| Config file | `~/.config/snapdoc/config.json` (mode `0600`) |
+| Config file | `~/.config/snapdoc/config.json` (mode `0600`) — keys: `api_url`, `token`, `passcode` |
 | Env vars | `SNAPDOC_API_URL`, `SNAPDOC_TOKEN`, `SNAPDOC_BOOTSTRAP`, `SNAPDOC_PASSCODE` |
 | Default API | `https://api.snapdoc.carraes.dev` |
 

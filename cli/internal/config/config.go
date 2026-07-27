@@ -17,6 +17,10 @@ const DefaultAPIURL = "https://api.snapdoc.carraes.dev"
 type Config struct {
 	APIURL string `json:"api_url"`
 	Token  string `json:"token"`
+	// Default passcode applied when creating, reading, or commenting on
+	// protected artifacts, so a shared passcode need not be repeated as a
+	// flag on every call. Per-command --passcode overrides it.
+	Passcode string `json:"passcode,omitempty"`
 }
 
 // Path returns the config file location (~/.config/snapdoc/config.json,
@@ -29,9 +33,10 @@ func Path() (string, error) {
 	return filepath.Join(dir, "snapdoc", "config.json"), nil
 }
 
-// Load reads the config file (if present) and applies SNAPDOC_API_URL and
-// SNAPDOC_TOKEN environment overrides, falling back to DefaultAPIURL.
-func Load() (Config, error) {
+// LoadFile reads the config file alone — no environment overrides, no
+// defaults — so a writer can update one field without persisting values that
+// only happen to be in the environment. Absent file yields a zero Config.
+func LoadFile() (Config, error) {
 	var cfg Config
 	p, err := Path()
 	if err != nil {
@@ -40,20 +45,33 @@ func Load() (Config, error) {
 	data, err := os.ReadFile(p)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		// no file: start from zero config
+		return cfg, nil
 	case err != nil:
 		return cfg, err
-	default:
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return cfg, fmt.Errorf("parse %s: %w", p, err)
-		}
-		warnLoosePermissions(p)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", p, err)
+	}
+	warnLoosePermissions(p)
+	return cfg, nil
+}
+
+// Load reads the config file (if present) and applies SNAPDOC_API_URL,
+// SNAPDOC_TOKEN, and SNAPDOC_PASSCODE environment overrides, falling back to
+// DefaultAPIURL.
+func Load() (Config, error) {
+	cfg, err := LoadFile()
+	if err != nil {
+		return cfg, err
 	}
 	if v := os.Getenv("SNAPDOC_API_URL"); v != "" {
 		cfg.APIURL = v
 	}
 	if v := os.Getenv("SNAPDOC_TOKEN"); v != "" {
 		cfg.Token = v
+	}
+	if v := os.Getenv("SNAPDOC_PASSCODE"); v != "" {
+		cfg.Passcode = v
 	}
 	if cfg.APIURL == "" {
 		cfg.APIURL = DefaultAPIURL
