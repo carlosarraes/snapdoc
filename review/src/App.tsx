@@ -13,6 +13,20 @@ const VIEWER_TOKEN = rootEl.dataset.viewerToken ?? "";
 const NAME_KEY = "snapdoc_reviewer_name";
 const EMAIL_KEY = "snapdoc_reviewer_email";
 const COLLAPSE_KEY = "snapdoc_rail_collapsed";
+const WIDTH_KEY = "snapdoc_rail_width";
+const DEFAULT_RAIL_WIDTH = 400;
+const MIN_RAIL_WIDTH = 260;
+// The document always keeps this much room, so dragging can never bury it.
+const MIN_DOC_WIDTH = 320;
+
+function maxRailWidthFor(viewport: number): number {
+  return Math.max(MIN_RAIL_WIDTH, viewport - MIN_DOC_WIDTH);
+}
+
+function clampRailWidth(width: number): number {
+  const max = maxRailWidthFor(window.innerWidth);
+  return Math.round(Math.min(Math.max(width, MIN_RAIL_WIDTH), max));
+}
 
 interface Identity {
   name: string;
@@ -49,6 +63,12 @@ export default function App() {
   }));
   const [editingIdentity, setEditingIdentity] = useState(() => !localStorage.getItem(NAME_KEY));
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === "1");
+  const [railWidth, setRailWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(WIDTH_KEY));
+    return clampRailWidth(saved > 0 ? saved : DEFAULT_RAIL_WIDTH);
+  });
+  const [maxWidth, setMaxWidth] = useState(() => maxRailWidthFor(window.innerWidth));
+  const [resizing, setResizing] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -97,6 +117,62 @@ export default function App() {
     setIdentity({ name: n, email: e });
     setEditingIdentity(false);
   }, []);
+
+  // Only deliberate resizes are remembered; shrinking the window re-clamps the
+  // sheet for this session without overwriting the width the reader chose.
+  const saveRailWidth = useCallback((width: number) => {
+    const next = clampRailWidth(width);
+    setRailWidth(next);
+    localStorage.setItem(WIDTH_KEY, String(next));
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => {
+      setMaxWidth(maxRailWidthFor(window.innerWidth));
+      setRailWidth((w) => clampRailWidth(w));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const startResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setResizing(true);
+  }, []);
+
+  const moveResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!resizing) return;
+      setRailWidth(clampRailWidth(window.innerWidth - e.clientX));
+    },
+    [resizing],
+  );
+
+  const endResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!resizing) return;
+      e.currentTarget.releasePointerCapture(e.pointerId);
+      setResizing(false);
+      localStorage.setItem(WIDTH_KEY, String(railWidth));
+    },
+    [resizing, railWidth],
+  );
+
+  const keyResize = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const step = e.shiftKey ? 64 : 16;
+      // The handle sits on the sheet's left edge: moving it left widens.
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        saveRailWidth(railWidth + step);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        saveRailWidth(railWidth - step);
+      }
+    },
+    [railWidth, saveRailWidth],
+  );
 
   const toggleCollapse = useCallback(() => {
     setCollapsed((c) => {
@@ -237,7 +313,10 @@ export default function App() {
   });
 
   return (
-    <div className={`review${collapsed ? " collapsed" : ""}`}>
+    <div
+      className={`review${collapsed ? " collapsed" : ""}${resizing ? " resizing" : ""}`}
+      style={{ "--rail-width": `${railWidth}px` } as React.CSSProperties}
+    >
       {meta.comments_enabled ? (
         <iframe
           ref={iframeRef}
@@ -257,6 +336,25 @@ export default function App() {
           💬 Comments{roots.length ? ` (${roots.length})` : ""}
         </button>
       )}
+
+      <div
+        className="rail-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize comments"
+        aria-valuenow={railWidth}
+        aria-valuemin={MIN_RAIL_WIDTH}
+        aria-valuemax={maxWidth}
+        tabIndex={0}
+        title="Drag to resize · double-click to reset"
+        onPointerDown={startResize}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+        onDoubleClick={() => saveRailWidth(DEFAULT_RAIL_WIDTH)}
+        onKeyDown={keyResize}
+      />
+
 
       <aside className="rail">
         <header className="rail-head">

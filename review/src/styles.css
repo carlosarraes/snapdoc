@@ -42,7 +42,8 @@ body {
 
 .review {
   display: grid;
-  grid-template-columns: 1fr 400px;
+  /* Middle track is the drag handle; the sheet's width is user-set. */
+  grid-template-columns: 1fr 6px var(--rail-width, 400px);
   height: 100vh;
 }
 
@@ -59,8 +60,50 @@ body {
   color: var(--muted);
 }
 
+/* Drag handle: a 6px grab strip carrying the 1px rule the reader sees, so
+   the target is comfortable without a heavy divider. */
+.rail-resizer {
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.rail-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+}
+
+.rail-resizer:hover::before,
+.rail-resizer:focus-visible::before,
+.review.resizing .rail-resizer::before {
+  width: 3px;
+  background: var(--accent);
+}
+
+.rail-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* During a drag the pointer crosses the document iframe, which would
+   otherwise swallow the move events even with pointer capture. */
+.review.resizing .doc {
+  pointer-events: none;
+}
+.review.resizing {
+  user-select: none;
+}
+
 .rail {
-  border-left: 1px solid var(--border);
   background: var(--bg);
   overflow-y: auto;
   padding: 1rem;
@@ -73,7 +116,8 @@ body {
 .review.collapsed {
   grid-template-columns: 1fr;
 }
-.review.collapsed .rail {
+.review.collapsed .rail,
+.review.collapsed .rail-resizer {
   display: none;
 }
 .rail-toggle {
@@ -325,8 +369,11 @@ button.link.danger {
     grid-template-columns: 1fr;
     grid-template-rows: 50vh 50vh;
   }
+  /* Stacked layout: there is no vertical edge to drag. */
+  .rail-resizer {
+    display: none;
+  }
   .rail {
-    border-left: 0;
     border-top: 1px solid var(--border);
   }
 }
