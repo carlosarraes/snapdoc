@@ -1,0 +1,12 @@
+<!-- Adaptive-icon foreground: the snapdoc logo's `$_` prompt on a transparent
+     108x108 canvas. The launcher masks everything outside a centred 66dp
+     circle, so the glyph is sized and placed to stay inside x,y ∈ [21,87].
+     Rendered to PNG by render-icon.sh because VectorDrawable cannot draw text. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <text x="54" y="70"
+        text-anchor="middle"
+        font-family="Liberation Mono"
+        font-weight="bold"
+        font-size="46"
+        fill="#3fb950">$_</text>
+</svg>
