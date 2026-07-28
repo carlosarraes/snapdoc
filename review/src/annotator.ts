@@ -46,10 +46,18 @@ async function main(): Promise<void> {
     else if (data.type === "focus") focus(data.id);
   });
 
-  // Report the user's text selection as a candidate anchor.
-  document.addEventListener("mouseup", () => {
+  // Report the user's text selection as a candidate anchor. Reached from two
+  // directions — see the listeners below — so identical consecutive states are
+  // reported once.
+  let lastReported = "";
+  let pointerHeld = false;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const reportSelection = (): void => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      if (lastReported === "none") return;
+      lastReported = "none";
       post({ type: "selectionCleared" });
       return;
     }
@@ -58,13 +66,37 @@ async function main(): Promise<void> {
     flat = flatten(document.body);
     const offsets = rangeToOffsets(flat, range);
     if (!offsets || offsets.start === offsets.end) {
+      if (lastReported === "none") return;
+      lastReported = "none";
       post({ type: "selectionCleared" });
       return;
     }
+    const key = `${offsets.start}:${offsets.end}`;
+    if (key === lastReported) return;
+    lastReported = key;
     const anchor = computeSelectors(flat.text, offsets.start, offsets.end);
     const r = range.getBoundingClientRect();
     post({ type: "selection", anchor, rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right } });
-  });
+  };
+
+  // Touch selection never produces a usable mouseup: a long press finalizes
+  // asynchronously, and dragging the native selection handles emits nothing
+  // but selectionchange. Settle briefly, and never mid-drag, so a mouse
+  // drag-select still reports once on release.
+  const scheduleReport = (): void => {
+    if (settleTimer !== undefined) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      if (!pointerHeld) reportSelection();
+    }, 250);
+  };
+
+  document.addEventListener("mouseup", reportSelection);
+  // Capture phase: a raw-HTML artifact that stops propagation must not be able
+  // to starve selection reporting.
+  document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+  document.addEventListener("pointerup", () => { pointerHeld = false; scheduleReport(); }, true);
+  document.addEventListener("pointercancel", () => { pointerHeld = false; scheduleReport(); }, true);
+  document.addEventListener("selectionchange", scheduleReport);
 
   // Clicking a highlighted span opens its thread in the rail.
   document.addEventListener("click", (e: MouseEvent) => {

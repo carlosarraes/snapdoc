@@ -61,6 +61,7 @@ func TestLoad(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", dir)
 			t.Setenv("SNAPDOC_API_URL", tt.envAPIURL)
 			t.Setenv("SNAPDOC_TOKEN", tt.envToken)
+			t.Setenv("SNAPDOC_PASSCODE", "")
 			if tt.file != "" {
 				writeFile(t, dir, tt.file)
 			}
@@ -83,6 +84,7 @@ func TestLoadInvalidJSON(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("SNAPDOC_API_URL", "")
 	t.Setenv("SNAPDOC_TOKEN", "")
+	t.Setenv("SNAPDOC_PASSCODE", "")
 	p := filepath.Join(dir, "snapdoc")
 	if err := os.MkdirAll(p, 0o700); err != nil {
 		t.Fatal(err)
@@ -100,6 +102,7 @@ func TestSaveTightensExistingLoosePermissions(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("SNAPDOC_API_URL", "")
 	t.Setenv("SNAPDOC_TOKEN", "")
+	t.Setenv("SNAPDOC_PASSCODE", "")
 
 	// Pre-create dir and file with loose modes; Save must tighten both.
 	cfgDir := filepath.Join(dir, "snapdoc")
@@ -184,6 +187,7 @@ func TestLoadWarnsOnLoosePermissions(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", dir)
 		t.Setenv("SNAPDOC_API_URL", "")
 		t.Setenv("SNAPDOC_TOKEN", "")
+		t.Setenv("SNAPDOC_PASSCODE", "")
 		cfgDir := filepath.Join(dir, "snapdoc")
 		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 			t.Fatal(err)
@@ -223,6 +227,7 @@ func TestSaveRoundTripAndPermissions(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("SNAPDOC_API_URL", "")
 	t.Setenv("SNAPDOC_TOKEN", "")
+	t.Setenv("SNAPDOC_PASSCODE", "")
 
 	want := Config{APIURL: "https://saved.example", Token: "tok-saved"}
 	if err := Save(want); err != nil {
