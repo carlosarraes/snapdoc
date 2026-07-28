@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -126,6 +127,11 @@ fun ReaderScreen(
 
 @SuppressLint("SetJavaScriptEnabled")
 private fun createWebView(context: Context, onProgress: (Int) -> Unit): WebView = WebView(context).apply {
+    // Without a definite height the WebView measures itself as wrap_content,
+    // which makes the CSS viewport zero-height: `vh` units and percentage
+    // heights collapse, so the review page's 50vh/50vh split renders empty
+    // even though innerHeight reports the right number.
+    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
     settings.javaScriptEnabled = true
     // The review rail keeps the reviewer's name in localStorage; without DOM
     // storage it throws on load and the comment panel never renders.

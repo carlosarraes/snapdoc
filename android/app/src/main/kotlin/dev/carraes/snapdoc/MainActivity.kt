@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -77,7 +78,9 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             SnapdocTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // targetSdk 36 always draws edge to edge, so the app must keep
+                // its own chrome clear of the status and navigation bars.
+                Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
                     var route by remember { mutableStateOf<Route>(if (tokens.read().isNullOrBlank()) Route.Settings else Route.List) }
 
                     val listViewModel: ListViewModel = viewModel(factory = factory { ListViewModel(api, cache) })
