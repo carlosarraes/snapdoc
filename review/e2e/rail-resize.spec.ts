@@ -119,6 +119,18 @@ test("keyboard resizes the sheet and double-click restores the default", async (
   await expect(handle).toHaveAttribute("aria-valuemin", String(MIN_WIDTH));
 });
 
+test("hiding the comments gives the document the whole viewport on a phone", async ({ page }) => {
+  // Narrow screens stack the document over the rail in two 50vh rows; hiding
+  // the rail must hand its row back rather than leaving empty background.
+  await page.setViewportSize({ width: 412, height: 915 });
+  await openReview(page);
+  await page.getByTitle("Hide comments").click();
+
+  await expect(page.locator(".rail")).toBeHidden();
+  const doc = (await page.locator("iframe.doc").boundingBox())!;
+  expect(Math.round(doc.height)).toBe(915);
+});
+
 test("hiding the comments gives the document the whole viewport", async ({ page }) => {
   await openReview(page);
   await page.getByTitle("Hide comments").click();

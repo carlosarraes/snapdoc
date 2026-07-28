@@ -45,6 +45,12 @@ out of commenting everywhere for an hour.
   - `security/` — AES-256-GCM blobs under an AndroidKeyStore key
 - `tools/icon/` — launcher-icon source and its render script
 
+Release builds are signed with a keystore kept outside the repo (`just
+android-keystore` creates it, `just android-release` builds and verifies).
+The debug and release builds carry different signatures, so swapping one for
+the other requires uninstalling first — which erases the saved token and
+passcodes.
+
 Everything the app persists (token, passcodes, cached list) is encrypted at
 rest. `android:allowBackup="false"` is deliberate: the key cannot leave the
 device, so a restored backup would decrypt to nothing.

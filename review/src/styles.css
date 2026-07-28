@@ -115,6 +115,9 @@ body {
 /* Collapsed: the document fills the viewport; a floating tab reopens the rail. */
 .review.collapsed {
   grid-template-columns: 1fr;
+  /* Also collapse the stacked-phone rows: without this the hidden rail's 50vh
+     row stays reserved and the document keeps only the top half. */
+  grid-template-rows: 1fr;
 }
 .review.collapsed .rail,
 .review.collapsed .rail-resizer {
