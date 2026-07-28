@@ -107,3 +107,70 @@ release new_version:
 # Remove build artifacts
 clean:
     @rm -rf {{build_dir}} {{cli_dir}}/{{binary_name}}
+
+# ---- Android companion app (android/) ----
+
+android_dir := "./android"
+android_apk := "android/app/build/outputs/apk/debug/app-debug.apk"
+app_id := "dev.carraes.snapdoc"
+# `java` on this machine is an asdf shim with no version pinned, so recipes
+# point Gradle at a real JDK themselves.
+java_home := env_var_or_default("JAVA_HOME", env_var("HOME") / ".asdf/installs/java/temurin-17.0.19+10")
+
+# One-time: install the Android SDK packages, write local.properties, fetch the wrapper.
+android-bootstrap:
+    @scripts/bootstrap-android.sh
+
+# Build the debug APK.
+android-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f {{android_dir}}/local.properties ]; then
+        echo "android/local.properties is missing — run: just android-bootstrap" >&2
+        exit 1
+    fi
+    JAVA_HOME="{{java_home}}" {{android_dir}}/gradlew -p {{android_dir}} :app:assembleDebug
+    echo "APK: {{android_apk}}"
+
+# Run the JVM unit tests (no device needed).
+android-test:
+    @JAVA_HOME="{{java_home}}" {{android_dir}}/gradlew -p {{android_dir}} :app:testDebugUnitTest
+
+# Attach a phone over wifi (Developer options > Wireless debugging shows the port).
+android-connect host="192.168.15.7:5555":
+    @adb connect {{host}}
+
+# Build and install on the attached phone.
+android-install: android-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    count=$(adb devices | awk 'NR>1 && $2=="device"' | wc -l)
+    if [ "$count" -eq 0 ]; then
+        echo "No device attached. Connect the phone, then run this again:" >&2
+        echo "  USB      enable Settings > Developer options > USB debugging, plug in," >&2
+        echo "           and accept the 'Allow USB debugging?' prompt." >&2
+        echo "  Wireless enable Wireless debugging, then: just android-connect <ip:port>" >&2
+        exit 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        echo "Several devices attached; pick one: adb -s <serial> install -r {{android_apk}}" >&2
+        exit 1
+    fi
+    adb install -r {{android_apk}}
+
+# Install and launch.
+android-run: android-install
+    @adb shell am start -n {{app_id}}/.MainActivity
+
+# Follow the app's logs.
+android-log:
+    @adb logcat --pid=$(adb shell pidof {{app_id}})
+
+# Regenerate the launcher icon PNGs from the source SVG.
+android-icon:
+    @android/tools/icon/render-icon.sh
+
+# Stop the Gradle daemons and drop build output (they hold a few GB).
+android-clean:
+    @JAVA_HOME="{{java_home}}" {{android_dir}}/gradlew -p {{android_dir}} --stop || true
+    @rm -rf {{android_dir}}/app/build {{android_dir}}/build

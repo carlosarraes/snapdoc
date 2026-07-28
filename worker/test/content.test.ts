@@ -147,3 +147,45 @@ describe("GET /v1/artifacts/:id/content", () => {
     await expectError(await readContent(null, id), 401, "unauthorized");
   });
 });
+
+// The Android app verifies passcode candidates here rather than against
+// POST /{id}/unlock, whose failures are counted per IP across every artifact
+// and shared with posting comments. That only works while this endpoint
+// checks the passcode BEFORE looking up the version, and never records a
+// rate-limit event. Reordering either would silently turn the app's free
+// probe into something that locks the user out of commenting site-wide.
+describe("passcode probe contract (relied on by the mobile app)", () => {
+  it("answers a correct passcode with 404 for an impossible version, and a wrong one with 401", async () => {
+    const tok = await mintToken();
+    const { id } = await publishProtected(tok.token, "hunter2", "# secret");
+
+    const right = await readContent(tok.token, id, { passcode: "hunter2", version: "999999999" });
+    expect(right.status).toBe(404);
+    expect(((await right.json()) as { error: { code: string } }).error.code).toBe("not_found");
+
+    const wrong = await readContent(tok.token, id, { passcode: "nope", version: "999999999" });
+    await expectError(wrong, 401, "passcode_incorrect");
+
+    const bare = await readContent(tok.token, id, { version: "999999999" });
+    await expectError(bare, 401, "passcode_required");
+  });
+
+  it("spends no rate-limit budget, however many candidates are tried", async () => {
+    const tok = await mintToken();
+    const { id } = await publishProtected(tok.token, "hunter2", "# secret");
+
+    for (let i = 0; i < 25; i++) {
+      await readContent(tok.token, id, { passcode: `guess-${i}`, version: "999999999" });
+    }
+
+    // Well past the 20/hour per-IP unlock budget: if probing consumed it, the
+    // unlock endpoint would now answer 429 instead of a plain wrong-passcode.
+    const unlock = await SELF.fetch(`https://snapdoc.carraes.dev/${id}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ passcode: "hunter2" }),
+      redirect: "manual",
+    });
+    expect(unlock.status).toBe(303);
+  });
+});
